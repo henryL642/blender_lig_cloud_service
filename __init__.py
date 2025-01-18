@@ -4,12 +4,14 @@ bl_info = {
     "name": "LiG AR Cloud",
     "author": "Plain Wu <plainwu@gmail.com> Druid Ting<druiddin@gmail.com> Henry Lin<henry.lin@lig.com.tw>",
     "version": (1, 4, 3),
-    "blender": (3, 6, 0),
+    "blender": (4, 3, 0),
     "location": "Scene->LiG Cloud Service",
-    "description": "LiG Cloud Service",
+    "description": "A Blender addon to interact with cloud services for downloading and updating objects.",
     "warning": "",
     "support": 'OFFICIAL',
     "category": "Import-Export",
+    "doc_url": "https://github.com/henryL642/blender_lig_cloud_service/wiki",  # 文檔鏈接
+    "tracker_url": "https://github.com/henryL642/blender_lig_cloud_service/issues",  # Issue Tracker
 }
 
 if "bpy" in locals():
