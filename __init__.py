@@ -2390,40 +2390,6 @@ class LiGJSONUpLoad(Operator,LiGAccount): # Json upload to server
 
         for obj in collection.objects:
             if obj.json_props.json_data:
-                data = json.loads(obj.json_props.json_data)
-
-                # 如果在JSON數據中存在'location'鍵，則更新其值
-                if 'location' in data:
-                    location = obj.location
-                    location = [round(val, 4) for val in location]  # 四捨五入到小數點後二位
-                    data['location']['x'] = location[0]
-
-                # 如果在JSON數據中存在'rotation'鍵，則更新其值
-                if 'rotation' in data:
-                    rotation = [math.degrees(a) for a in obj.rotation_euler]
-                    rotation = [round(val, 4) for val in rotation]  # 四捨五入到小數點後二位
-                    data['rotation'] = rotation
-
-                # 如果在JSON數據中存在'scale'鍵，則更新其值
-                if 'scale' in data:
-                    scale = obj.scale
-                    scale = [round(val, 4) for val in scale]# 四捨五入到小數點後二位
-                    data['scale'] = scale
-                
-                obj.json_props.json_data = json.dumps(data)
-
-                # 生成文件路径
-                file_path = os.path.join(set_save_path, f"{obj.name}.json")
-                try:
-                    with open(file_path, 'w') as file:
-                        json.dump(data, file)
-                except:
-                    self.report({'ERROR'}, f"Failed to write to file: {file_path}")
-                    return {'CANCELLED'}
-        # 上傳至雲端
-        client = LigDataApi.ApiClient.shared()
-        for obj in collection.objects:
-            if obj.json_props.json_data:
         
                 data = json.loads(obj.json_props.json_data)                
                 #位置、旋轉、縮放賦值
