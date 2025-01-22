@@ -21,21 +21,28 @@ else:
     from . import LigDataApi
 
 import os
-import time
-import threading
+import subprocess
+import sys
 import bpy
 import requests
 import math
 import json
 import enum
+import concurrent.futures
 from PIL import Image
 from datetime import datetime
 from math import degrees, pi
+from urllib.parse import urlparse
 from mathutils import Vector
 from bpy_extras.image_utils import load_image
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 from math import radians
 
+# 需要安装的依赖包
+REQUIRED_PACKAGES = [
+    "requests",
+    "Pillow",
+]
 
 from bpy.props import (
     StringProperty,
@@ -170,12 +177,42 @@ class ARJsonProperties(PropertyGroup):
     #------------------------------------------------
     # model.fields - 以下屬性都在 fields 裡：Particle
     #------------------------------------------------
-    particle_birth_rate: bpy.props.FloatProperty(name="particle_birth_rate")   # type: ignore
-    particle_birth_rate_variation: bpy.props.FloatProperty(name="particle_birth_rate_variation") # type: ignore
-    particle_life_span: bpy.props.FloatProperty(name="particle_life_span")    # type: ignore
-    particle_life_span_variation: bpy.props.FloatProperty(name="particle_life_span_variation")  # type: ignore
-    particle_velocity: bpy.props.FloatProperty(name="particle_velocity") # type: ignore  
-    particle_velocity_variation: bpy.props.FloatProperty(name="particle_velocity_variation")   # type: ignore
+    particle_birth_rate: FloatProperty(
+        name="Birth Rate",
+        description="Particle birth rate",
+        default=0.0,
+        min=0.0,
+    )   # type: ignore
+    particle_birth_rate_variation: FloatProperty(
+        name="Birth Rate Variation",
+        description="Variation in particle birth rate",
+        default=0.0,
+        min=0.0,
+    )   # type: ignore
+    particle_life_span: FloatProperty(
+        name="Life Span",
+        description="Particle life span",
+        default=0.0,
+        min=0.0,
+    )   # type: ignore
+    particle_life_span_variation: FloatProperty(
+        name="Life Span Variation",
+        description="Variation in particle life span",
+        default=0.0,
+        min=0.0,
+    )   # type: ignore
+    particle_velocity: FloatProperty(
+        name="Velocity",
+        description="Particle velocity",
+        default=0.0,
+        min=0.0,
+    )   # type: ignore
+    particle_velocity_variation: FloatProperty(
+        name="Velocity Variation",
+        description="Variation in particle velocity",
+        default=0.0,
+        min=0.0,
+    )   # type: ignore
 
     #------------------------------------------------
     # actions, transparency, events, sub_events, is_child
@@ -183,7 +220,14 @@ class ARJsonProperties(PropertyGroup):
     # 這裡先用 StringProperty 簡單儲存
     #------------------------------------------------
     actions: bpy.props.StringProperty(name="Actions") # type: ignore
-    transparency: bpy.props.FloatProperty(name="Transparency", default=1.0)   # type: ignore
+    # transparency: bpy.props.FloatProperty(name="Transparency", default=1.0)   # type: ignore
+    transparency: FloatProperty(
+        name="Transparency",
+        description="Transparency of the object",
+        default=1.0,  # 默认值
+        min=0.0,      # 最小值
+        max=1.0,      # 最大值
+    )   # type: ignore
     events: bpy.props.StringProperty(name="Events")   # type: ignore
     sub_events: bpy.props.StringProperty(name="Sub Events")   # type: ignore
     is_child: bpy.props.BoolProperty(name="Is Child",default = False) # type: ignore
@@ -354,6 +398,20 @@ alignment_axis = None  # 存儲對齊的軸
 #====================================================
 # 2) Functions: 
 #====================================================
+def install_packages():
+    # 获取 Blender 的 Python 解释器路径
+    python_exe = sys.executable
+
+    # 安装每个依赖包
+    for package in REQUIRED_PACKAGES:
+        try:
+            # 检查包是否已安装
+            __import__(package)
+        except ImportError:
+            # 如果未安装，则使用 pip 安装
+            print(f"Installing {package}...")
+            subprocess.check_call([python_exe, "-m", "pip", "install", package])
+
 def download_json_from_server(url, local_filepath):
     """ 從伺服器下載 JSON, 寫入 local_filepath """
     resp = requests.get(url)
@@ -390,15 +448,7 @@ def sync_from_json(obj_name,obj_type):
         print(f'Object "{obj_name}" not found')
         return
 
-    # top_parent = obj
-    # while top_parent.parent:
-    #     top_parent = top_parent.parent
-    
-    # bpy.ops.object.select_all(action='DESELECT')
-    # top_parent.select_set(True)
-    # bpy.context.view_layer.objects.active = top_parent
-    if hasattr(obj, 'json_props'):
-        
+    if hasattr(obj, 'json_props'):        
         props = obj.json_props
         if not props.json_data:
             return
@@ -408,14 +458,14 @@ def sync_from_json(obj_name,obj_type):
             print("Warning: JSON decode error.")
             return
 
+        loc = data.get('location')
         # 位置 & 旋轉
-        loc = data.get("location", {})
-        props.loc_x = loc.get("x", 0.0)
-        props.loc_y = loc.get("y", 0.0)
-        props.loc_z = loc.get("z", 0.0)
-        props.rotate_x = loc.get("rotate_x", 0.0)
-        props.rotate_y = loc.get("rotate_y", 0.0)
-        props.rotate_z = loc.get("rotate_z", 0.0)
+        props.loc_x = loc.get('x')
+        props.loc_y = loc.get('y')
+        props.loc_z = loc.get('z')
+        props.rotate_x = loc.get('rotate_x')
+        props.rotate_y = loc.get('rotate_y')
+        props.rotate_z = loc.get('rotate_z')
 
         # zoom
         zoom = data.get("zoom", {})
@@ -519,11 +569,12 @@ def sync_from_json(obj_name,obj_type):
     else:
         print(f'Object "{props.name}" dese not have "json_props"')
 
-def sync_to_json(obj,obj_type):  #ARJsonProperties 中的屬性值寫回 obj.json_props.json_data，
+def sync_to_json(obj_name,obj_type):  #ARJsonProperties 中的屬性值寫回 obj.json_props.json_data，
     """
     將 ARJsonProperties 中的屬性值寫回 obj.json_props.json_data，
     以維持整個 JSON 原結構。
     """
+    obj = bpy.data.objects.get(obj_name)
     props = obj.json_props
     if not props.json_data:
         return
@@ -536,8 +587,6 @@ def sync_to_json(obj,obj_type):  #ARJsonProperties 中的屬性值寫回 obj.jso
     # location
     if "location" not in data:
         data["location"] = {}
-
-
 
     data["location"]["x"] = props.loc_x
     data["location"]["y"] = props.loc_y
@@ -677,7 +726,6 @@ def count_objects_in_collection(collection_name):
         return 0
 
 #共用函式區---------------------------------------------------------------------------------------------------------------------
-#檔案名稱建立
 def file_name_set(name):
     file_name = f"{name}.json"
     return file_name
@@ -879,7 +927,6 @@ class LIG_PT_JsonPanel(Panel): # JSON 3DVIEW 面板 - Field（2024/12/15）
             # layout.operator(LIG_OT_SetProperties.bl_idname, text="Set Property")
 
             data = json.loads(obj.json_props.json_data)
-            print(data)
             fields = data['model']['fields']
             model_type = data['model']['type']
 
@@ -920,26 +967,31 @@ class LIG_PT_JsonPanel(Panel): # JSON 3DVIEW 面板 - Field（2024/12/15）
         col.prop(props, 'is_size_scale_lock')
         
     def draw_video_fields(self, layout, obj):
+        props = obj.json_props
         layout.label(text="Video Parameters:")
         box = layout.box()
-        box.label(text="general")        
-        box.prop(obj, '["is_child"]', text="is_child")
-        box.prop(obj, '["is_allow_pinch"]', text="Allow_pinched")
-        box.prop(obj, '["is_occlusion"]', text="Occlusion")
-        box.prop(obj, '["is_hidden"]', text="Hidden")
-        box.prop(obj, '["face_me"]', text="Faceme")
-        box.prop(obj, '["visible_distance"]', text="Visibility dist")
-        box.prop(obj, '["is_ignore"]', text="Ignore dist limit")
-        box.prop(obj, '["transparency"]', text="Transparency")
+        box.label(text="general")   
+        col = box.column(align=True)      
+        col.prop(props, 'is_child')
+        col.prop(props, 'is_allow_pinch')
+        col.prop(props, 'is_occlusion')
+        col.prop(props, 'is_hidden')
+        col.prop(props, 'face_me')
+        col.prop(props, 'visible_distance')
+        col.prop(props, 'is_ignore')
+        col.prop(props, 'transparency')
+
         box = layout.box()
-        box.label(text="keying")    
-        box.prop(obj, '["hue_angle"]', text="hue_angle")
-        box.prop(obj, '["hue_range"]', text="hue_range")
-        box.prop(obj, '["saturation"]', text="saturation")
+        box.label(text="keying")  
+        col = box.column(align=True)  
+        col.prop(props, 'hue_angle')
+        col.prop(props, 'hue_range')
+        col.prop(props, 'saturation')
         box = layout.box()
-        box.label(text="play property")         
-        box.prop(obj, '["is_play"]', text="autoplay")
-        box.prop(obj, '["is_loop_play"]', text="loop play")
+        box.label(text="play property")  
+        col = box.column(align=True)
+        col.prop(props, 'is_play')
+        col.prop(props, 'is_loop_play')
 
     def draw_3d_model_fields(self, layout, obj):
         props = obj.json_props
@@ -980,49 +1032,55 @@ class LIG_PT_JsonPanel(Panel): # JSON 3DVIEW 面板 - Field（2024/12/15）
         col_a.prop(props, "multiply_is_zero_y")         
 
     def draw_ARInfoBall_fields(self, layout, obj):
+        props = obj.json_props
         layout.label(text="ArInfoBall v1.0 Parameters:")
         box = layout.box()
-        box.label(text="general")        
-        box.prop(obj, '["is_child"]', text="is_child")
-        box.prop(obj, '["is_allow_pinch"]', text="Allow_pinched")
-        box.prop(obj, '["is_occlusion"]', text="Occlusion")
-        box.prop(obj, '["is_hidden"]', text="Hidden")
-        box.prop(obj, '["face_me"]', text="Faceme")
-        box.prop(obj, '["visible_distance"]', text="Visibility dist")
-        box.prop(obj, '["is_ignore"]', text="Ignore dist limit")
-        box.prop(obj, '["transparency"]', text="Transparency")
+        box.label(text="general")
+        col = box.column(align=True)     
+        col.prop(props, "is_child")
+        col.prop(props, "is_allow_pinch")
+        col.prop(props, "is_occlusion")
+        col.prop(props, "is_hidden")
+        col.prop(props, "face_me")
+        col.prop(props, "visible_distance")
+        col.prop(props, "is_ignore")
+        col.prop(props, "transparency")
 
         box = layout.box()
-        box.label(text="layer property")    
-        box.prop(obj, '["floor_count"]', text="layer number")
-        box.prop(obj, '["face_count"]', text="obj number/layer")
-        box.prop(obj, '["floor_height"]', text="obj height")
-        box.prop(obj, '["face_width"]', text="obj width")
-        # box.prop(obj, '["floor_gap"]', text="layer gap")
-        box.prop(obj, '["face_gap_list"]', text="layers gap")
-        box.prop(obj, '["floor_angles"]', text="layers angle")
+        box.label(text="layer property")
+        col = box.column(align=True)   
+        col.prop(props, 'floor_count')
+        col.prop(props, 'face_count')
+        col.prop(props, 'floor_height')
+        col.prop(props, 'face_width')
+        box.prop(props, 'floor_gap')
+        col.prop(props, 'face_gap_list')
+        col.prop(props, 'floor_angles')
 
     def draw_particle_fields(self, layout, obj):
+        props = obj.json_props
         layout.label(text="Particle Parameters:")
         box = layout.box()
-        box.label(text="general")        
-        box.prop(obj, '["is_child"]', text="is_child")
-        box.prop(obj, '["is_allow_pinch"]', text="Allow_pinched")
-        box.prop(obj, '["is_occlusion"]', text="Occlusion")
-        box.prop(obj, '["is_hidden"]', text="Hidden")
-        box.prop(obj, '["face_me"]', text="Faceme")
-        box.prop(obj, '["visible_distance"]', text="Visibility dist")
-        box.prop(obj, '["is_ignore"]', text="Ignore dist limit")
-        box.prop(obj, '["transparency"]', text="Transparency")
+        box.label(text="general")
+        col = box.column(align=True)     
+        col.prop(props, "is_child")
+        col.prop(props, "is_allow_pinch")
+        col.prop(props, "is_occlusion")
+        col.prop(props, "is_hidden")
+        col.prop(props, "face_me")
+        col.prop(props, "visible_distance")
+        col.prop(props, "is_ignore")
+        col.prop(props, "transparency")
 
         box = layout.box()
-        box.label(text="partivle property")    
-        box.prop(obj, '["particle_birth_rate"]', text="number")
-        box.prop(obj, '["particle_birth_rate_variation"]', text="number range")
-        box.prop(obj, '["particle_life_span"]', text="lifetime")
-        box.prop(obj, '["particle_life_span_variation"]', text="lifetime range")
-        box.prop(obj, '["particle_velocity"]', text="G velocity")
-        box.prop(obj, '["particle_velocity_variation"]', text="G velocity range")    
+        box.label(text="partivle property")
+        col = box.column(align=True)    
+        col.prop(props, 'particle_birth_rate')
+        col.prop(props, 'particle_birth_rate_variation')
+        col.prop(props, 'particle_life_span')
+        col.prop(props, 'particle_life_span_variation')
+        col.prop(props, 'particle_velocity')
+        col.prop(props, 'particle_velocity_variation')    
 
 class LiG_PT_OBJAlignment(Panel):   # JSON 3DVIEW - Obj Alignment
     bl_label = "Object Alignment"
@@ -1040,9 +1098,9 @@ class LiG_PT_OBJAlignment(Panel):   # JSON 3DVIEW - Obj Alignment
         if obj:
             box = layout.box()
             box.label(text = "Alignment")
-            row = box.row()
-            row.label(text="Select above 2 objects to align.")
-            row.label(text=f"Selected objects: {len(context.selected_objects)}")
+            col = box.column()
+            col.label(text="Select above 2 objects to align.")
+            col.label(text=f"Selected objects: {len(context.selected_objects)}")
 
             if len(context.selected_objects)>1:
                 if all(obj.parent is None for obj in context.selected_objects):                 
@@ -1167,539 +1225,1064 @@ class LiGDownloader(Operator):  #下載AR物件
     bl_label = "Download AR Objects from LiG Cloud"
 
     def execute(self, context):
-        bpy.context.scene.cursor.location = (0, 0, 0) #cursor歸零
-        set_save_path = context.scene.save_path #儲存路徑
+        # 初始化
+        self.context = context
+        self.set_save_path = context.scene.save_path
 
-        if set_save_path != "":
-            if os.path.exists(set_save_path):
-                print("輸出路徑: ", set_save_path)
-            else:
-                self.report({'ERROR'}, "Output path does not exist. Please reset it.")
-                return {'CANCELLED'}
-        else:
-            self.report({'ERROR'}, "Save path not set.")
+        # 檢查保存路徑
+        if not self._validate_save_path():
             return {'CANCELLED'}
 
-        def create_empty_object(name, parent=None):
-            # 取消選取所有物件，不使用 bpy.ops
-            for obj in bpy.context.selected_objects:
-                obj.select_set(False)
+        # 確保用戶已登錄
+        self.client = LigDataApi.ApiClient.shared()
+        if not self.client.authenticated():
+            self.report({'ERROR'}, "Login to LiG Cloud first")
+            return {'CANCELLED'}
+
+        # 下載 AR 物件數據
+        ar_objects = self.client.download_ar_objects(context.scene.lig_scene)
+        parent_col_name = context.scene.lig_scene 
+        parent_collection = bpy.data.collections.get(parent_col_name) or CreateCollection.create_collection(parent_col_name)        
+        if not ar_objects:
+            self.report({'ERROR'}, "No AR objects found to download")
+            return {'CANCELLED'}
+
+        # 收集下載任務
+        download_tasks = []
+        for ar_obj in ar_objects:
+            print(ar_obj)
+            obj_name = f"{ar_obj['id']}-{ar_obj['name']}"
+            obj_type = ar_obj['model']['type']
+            urls = self._extract_url(ar_obj)
+            if urls:
+                if isinstance(urls, list):  # ARINFOBALL has multiple URLs
+                    for i, url in enumerate(urls):
+                        download_tasks.append((ar_obj, url, i))  # include index for filename
+                else:  # single URL for other object types
+                    download_tasks.append((ar_obj, urls, 0))
+            else:
+                self.report({'WARNING'}, f"No URL found for object {obj_name}")
+
+        # 使用 ThreadPoolExecutor 進行多線程下載
+        downloaded_items = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(self._download_file_with_ar_obj, ar_obj, url, idx) for ar_obj, url, idx in download_tasks]
             
-            # 創建空物件
-            empty_obj = bpy.data.objects.new(name, None)
-            bpy.context.collection.objects.link(empty_obj) #將empty_obj添加至當前collection
-            empty_obj.location = (0, 0, 0)
-            empty_obj.scale = (1, 1, 1)
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    ar_obj, file_path, idx = future.result()
+                    if file_path:
+                        downloaded_items.append((ar_obj, file_path, idx))
+                    else:
+                        self.report({'ERROR'}, f"Failed to download file for {ar_obj['name']}")
+                except Exception as e:
+                    self.report({'ERROR'}, f"Download failed: {e}")
 
-            if parent is not None:
-                empty_obj.parent = parent
-            return empty_obj
+        # 在主線程中導入下載的模型
+        for ar_obj, file_path, idx in downloaded_items:
+            obj_name = f"{ar_obj['id']}-{ar_obj['name']}"
+            obj_type = ar_obj['model']['type']
+            location = self._transform_location(ar_obj['location'])
+            rotation = self._transform_rotation(ar_obj['location'])
+            scale = self._transform_scale(ar_obj['zoom'])
+            jsonfile_name = f"{obj_name}.json"
+            json_path = os.path.join(context.scene.save_path, jsonfile_name)
+            # 已經存在的物件，更新位置屬性、更新properties
+            if obj_name in bpy.data.objects:
+                obj = bpy.data.objects[obj_name]
+                obj.location = location
+                obj.rotation_euler = rotation
+                obj.scale = scale
+                obj.json_props.json_data = json.dumps(ar_obj)
+                obj_name = obj.json_props.obj_name
+            else:  # 新的物件
+                if os.path.exists(file_path):      
+                    # 1.建立一個空體                
+                    empty_obj = self._create_empty_object(obj_name)
+                    if obj_type == ARObjectType.ARINFOBALL.value:
+                        # 獲取原始 texture.photos 的 URL 列表
+                        original_urls = ar_obj['model']['texture']['photos']                        
+                        # 收集當前物件所有已下載的圖片路徑（按原始順序）
+                        sorted_file_paths = []
+                        for url in original_urls:
+                            # 根據 URL 在 downloaded_items 中查找對應的本地路徑
+                            for downloaded_ar_obj, downloaded_path, idx in downloaded_items:
+                                print(f"ar_obj ID: {ar_obj['id']}, file_path: {file_path}, idx: {idx}")
+                                if downloaded_ar_obj['id'] == ar_obj['id'] and url in downloaded_ar_obj['model']['texture']['photos'][idx]:
+                                    sorted_file_paths.append(downloaded_path)
+                                    break
+                        # 將排序後的圖片路徑傳遞給 _create_arinfoball_layers
+                        self._create_arinfoball_layers(empty_obj, ar_obj['model']['fields'], sorted_file_paths)            
+                        self._set_empty_object(empty_obj, location, rotation, scale)
+                    else:
+                        self._import_model(file_path, obj_name, empty_obj)
+                        self._set_empty_object(empty_obj, location, rotation, scale)
+                    obj = bpy.data.objects.get(obj_name)
+                    if obj:
+                        obj.json_props.json_data = json.dumps(ar_obj)
+                        print(f'json_data: {obj.json_props.json_data}')
+                        sync_from_json(obj_name,obj_type)
+                        save_json_to_file(obj, json_path)
+                        object_to_collection(obj, parent_collection)
+                    else:
+                        self.report({'ERROR'}, f'{obj_name} not built')                
+        self.report({'INFO'}, "Download and import completed.")
+        return {'FINISHED'}
+
+    def _validate_save_path(self):
+        """檢查保存路徑是否有效"""
+        if not self.set_save_path:
+            self.report({'ERROR'}, "Save path not set.")
+            return False
+        if not os.path.exists(self.set_save_path):
+            self.report({'ERROR'}, "Output path does not exist. Please reset it.")
+            return False
+        return True
+
+    def _extract_url(self, ar_obj):
+        """從 AR 物件中提取下載 URL"""
+        obj_type = ar_obj['model']['type']
+        if obj_type == ARObjectType.ARINFOBALL.value:
+            textures = ar_obj['model']['texture'].get('photos', [])
+            return textures
+        else:
+            texture_fields = [ar_obj['model'].get(key) for key in ('texture', 'ios_texture', 'android_texture')]
+            for texture in texture_fields:
+                if texture and texture.get('url'):
+                    return texture['url']
+        return None
+
+    def _download_file_with_ar_obj(self, ar_obj, url, index):
+        try:
+            file_path = self._download_file(ar_obj, url, index)
+            if file_path:
+                return (ar_obj, file_path, index)
+            else:
+                self.report({'ERROR'}, f"Failed to download file for {ar_obj['name']}")
+                return (ar_obj, None, index)
+        except Exception as e:
+            print(f"Download failed for {ar_obj['name']}: {e}")
+            return (ar_obj, None, index)
+
+    def _download_file(self, ar_obj, url, index=0):
+        parsed_url = urlparse(url)
+        path = parsed_url.path
+        file_name = os.path.basename(path)
+        if not file_name:
+            file_name = f"{ar_obj['id']}-{ar_obj['name']}_{index}"
+        else:
+            file_name = f"{ar_obj['id']}-{ar_obj['name']}_{index}{os.path.splitext(file_name)[1]}"
+        file_path = os.path.join(self.set_save_path, file_name)
+        try:
+            file_path = self.client.download(url).name
+            print(f"Downloaded {file_name} to {file_path}")
+            return file_path
+        except Exception as e:
+            print(f"Failed to download file {url}: {e}")
+            return None
+
+
+    def _create_arinfoball_layers(self, empty_obj, fields, texture_paths):
+        """
+        創建多層資訊球環結構，並將所有平面設置為 parent_obj 的子級。
+        """
+        num_layers = fields['floor_count']
+        num_planes = fields['face_count']
+        plane_width = fields['face_width']
+        plane_height = fields['floor_height']
+        plane_gaps = fields['face_gap']
+        layer_gap = fields['floor_gap']
+        rotation_x_values = fields['floor_angles']
+        
+        all_planes = self._create_ring_of_planes(
+            num_layers=num_layers, 
+            num_planes=num_planes, 
+            width=plane_width, 
+            height=plane_height,
+            plane_gaps=plane_gaps, 
+            layer_gap=layer_gap, 
+            rotation_x_values=rotation_x_values,
+            image_paths=texture_paths,
+            parent_obj=empty_obj  # 新增的參數，直接設置每個平面的父物件
+        )
+        return all_planes
+
+    def _create_ring_of_planes(self, num_layers, num_planes, width, height, plane_gaps, layer_gap, rotation_x_values, image_paths, parent_obj=None):
+        """
+        創建多層環形平面結構，每層包含多個平面，並應用對應的圖片。可選擇設置父物件。
+        """
+        print(num_layers,num_planes,len(image_paths))
+        if len(image_paths) != num_layers * num_planes:
+            #raise ValueError("圖片數量必須等於層數與平面數的乘積")
+            print('圖片數量必須等於層數與平面數的乘積')
+        if isinstance(plane_gaps,(int, float)):
+            plane_gaps = [plane_gaps] * num_layers
+        elif len[plane_gaps] != num_layers:
+            plane_gaps = [plane_gaps[0]] * num_layers
+
+        angle_step = 2 * math.pi / num_planes
+        rotation_x_values_radians = [math.radians(angle) for angle in rotation_x_values[::-1]]
+        planes = []
+
+        for layer_index in range(num_layers):
+            radius = (width + plane_gaps[layer_index]) * num_planes / (2 * math.pi)
+            for i in range(num_planes):
+                angle = i * angle_step
+                x = radius * math.cos(angle)
+                y = radius * math.sin(angle)
+                z = layer_index * (height + layer_gap) - (height + layer_gap) * (num_layers - 1) / 2
+                plane_name = f"Plane_L{layer_index + 1}_{i + 1}"
+                rotation_z = angle + math.pi / 2
+                image_path = image_paths[layer_index * num_planes + i]
+                plane = self._create_plane(plane_name, width, height, (x, y, z), rotation_x_values_radians[layer_index], rotation_z, image_path)
+
+                if parent_obj:
+                    plane.parent = parent_obj  # 自動設置父物件
+                planes.append(plane)
+                print(f'完成P{layer_index}的{i}')
+
+        return planes
+
+    def _create_plane(self, name, width, height, location, rotation_x, rotation_z, image_path):
+        # image_path = 'https://api.lig.com.tw/ar_asset/voa4l7bpqzvilb2ycylpv1btd4r9.png'
+        bpy.ops.mesh.primitive_plane_add(size=1, enter_editmode=False, align='WORLD', location=location)
+        plane = bpy.context.active_object
+        plane.name = name
+        plane.scale = (width, height, 1)
+        
+        # 旋轉90度，使其垂直於XY平面
+        plane.rotation_euler.x = math.radians(90) + rotation_x
+        
+        # 使plane與環形相切
+        plane.rotation_euler.z = rotation_z
+        
+        # 將旋轉應用到plane對象上
+        bpy.context.view_layer.objects.active = plane
+        bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
+        
+        # 為 plane 分配貼圖
+        self._assign_material(plane, image_path)
+        
+        return plane
+
+    def _assign_material(self, plane, image_path):
+        material_name = os.path.splitext(os.path.basename(image_path))[0]
+        
+        # 創建新材質
+        material = bpy.data.materials.new(name=material_name)
+        material.use_nodes = True
+        bsdf_node = material.node_tree.nodes["Principled BSDF"]
+        
+        # 加載本地圖片（不再需要 client.download）
+        try:
+            image = bpy.data.images.load(image_path)
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to load image: {image_path}")
+            return
+
+        image_node = material.node_tree.nodes.new(type="ShaderNodeTexImage")
+        image_node.image = image
+        
+        # 連接圖片節點到 BSDF 節點
+        material.node_tree.links.new(image_node.outputs[0], bsdf_node.inputs["Base Color"])
+        
+        # 连接图片节点的 alpha 输出到 BSDF 节点的 alpha 输入
+        material.node_tree.links.new(image_node.outputs[1], bsdf_node.inputs["Alpha"])
+        
+        # 將材質分配給對象
+        if len(plane.data.materials) == 0:
+            plane.data.materials.append(material)
+        else:
+            plane.data.materials[0] = material
             
-        def set_empty_object(empty_obj, location, rotation, scale):
-            # 取消選取所有物件，避免使用 bpy.ops
-            for obj in bpy.context.selected_objects:
-                obj.select_set(False)
+        # 设置 Blend Mode 为 Alpha Blend
+        material.blend_method = 'BLEND'
 
-            empty_obj.rotation_mode = 'XYZ'  # 指定欧拉角的旋转模式
-            empty_obj.rotation_euler = (radians(rotation[0]), radians(rotation[1]), radians(rotation[2]))  # 将度数转换为弧度
-            empty_obj.location = location
-            empty_obj.scale = scale
-            #empty_obj.name = name   #henry  
-            return empty_obj
+    def _create_empty_object(self, name, parent=None):
+        collection = bpy.context.collection
 
-        def extract_frames_from_gif(gif_path, output_dir):
-            """將 GIF 拆解為影像序列"""
-            gif = Image.open(gif_path)
-            frame_count = gif.n_frames
-            frame_paths = []
-            print(f'總共有{frame_count}個檔案')
-            for frame in range(frame_count):
-                gif.seek(frame)
-                frame_path = os.path.join(output_dir, f"frame_{frame:03d}.png")
-                gif.save(frame_path, "PNG")
-                frame_paths.append(frame_path)
-                print(f'第{frame}個gif檔案位置為{frame_path}')
-                       
-            return frame_paths
+        if name in bpy.data.objects:
+            return bpy.data.objects[name]
+        
+        empty_obj = bpy.data.objects.new(name, None)
+        collection.objects.link(empty_obj)
 
-        def prepare_gif_handling(gif_path):
-            """檢查 GIF 文件並建立暫存路徑"""
-            if not gif_path.lower().endswith(".gif"):
-                raise ValueError("This is not a GIF file.")
-            work_dir = os.path.join(os.path.dirname(gif_path), "temp_gif_frames")
-            os.makedirs(work_dir, exist_ok=True)
-            print(f"work_dir is {work_dir}")
-            return work_dir
+        empty_obj.location = (0, 0, 0)
+        empty_obj.scale = (1, 1, 1)
 
-        def adjust_image_dimensions(plane, image):
-            """
-            調整平面的大小以匹配影像的長寬比例
-            """
-            if image is None or image.size[0] == 0 or image.size[1] == 0:
-                return
+        return empty_obj
 
-            # 計算影像比例
+    def _set_empty_object(self, empty_obj, location, rotation, scale):
+        """設置空物件的位置、旋轉和縮放"""
+        empty_obj.rotation_mode = 'XYZ'
+        empty_obj.rotation_euler = rotation
+        empty_obj.location = location
+        empty_obj.scale = scale
+
+    def _import_model(self, model_path, name, parent_empty):
+        file_name = os.path.basename(model_path)
+        folder_path = os.path.dirname(model_path)
+        try:
+            lower_model_path = model_path.lower()
+            if lower_model_path.endswith(".glb"):
+                bpy.ops.import_scene.gltf( 
+                    filepath=model_path, 
+                    export_import_convert_lighting_mode='SPEC', 
+                    filter_glob='*.glb;*.gltf',
+                    loglevel=20, 
+                    import_pack_images=True, 
+                    merge_vertices=True, 
+                    import_shading='NORMALS', 
+                    bone_heuristic='TEMPERANCE', 
+                    guess_original_bind_pose=False, 
+                    import_webp_texture=False
+                )    
+            elif lower_model_path.endswith((".mp4", ".mov")):
+                bpy.ops.image.import_as_mesh_planes(relative=False, filepath=model_path, files=[{"name":file_name, "name":file_name}], directory=folder_path)   #for blender 4.3
+                # bpy.ops.image.import_as_mesh_planes(relative=False, filepath="/Users/henry642/Downloads/1.png", files=[{"name":os.path.basename(model_path), "name":os.path.basename(model_path)}], directory=os.path.dirname(model_path), align_axis='+Z')
+                video_obj = bpy.context.selected_objects[0]  
+                if video_obj.type == 'MESH':
+                    video_texture = video_obj.active_material.node_tree.nodes.get("Image Texture")
+                    if video_texture and video_texture.image:
+                        video_width = video_texture.image.size[0]
+                        video_height = video_texture.image.size[1]
+                        print(f'{name}影片解析度：{video_width}x{video_height}')
+
+                        video_max_dim = max(video_width,video_height)
+                        video_obj_dimx = video_width/video_max_dim
+                        video_obj_dimy = video_height/video_max_dim
+                        video_obj.dimensions = Vector((video_obj_dimx,video_obj_dimy,0))
+                        video_obj.rotation_euler[0] = radians(90)
+                        bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+                        print(f'{name} 建立完成')   
+                        print(f'dimensions為{video_obj.dimensions}')
+                    else:
+                        print(f'無法獲取{name}的材質或影像資訊')                      
+ 
+            elif lower_model_path.endswith((".png", ".jpg", ".jpeg", ".webp")):
+                bpy.ops.image.import_as_mesh_planes(relative=False, filepath=model_path, files=[{"name":file_name, "name":file_name}], directory=folder_path)   #for blender 4.3
+                # 將長寬值高者normalize 1公尺
+                img_obj = bpy.context.selected_objects[0]
+                if img_obj.type == 'MESH':                  
+                    img_max_dim = max(img_obj.dimensions[0], img_obj.dimensions[1])
+                    img_obj_dimx = img_obj.dimensions[0]/img_max_dim
+                    img_obj_dimy = img_obj.dimensions[1]/img_max_dim
+                    img_obj.dimensions = Vector((img_obj_dimx,img_obj_dimy,0))
+                    img_obj.rotation_euler[0] = radians(90)
+                    bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+                    print(f'{name} 建立完成')
+            elif lower_model_path.endswith(".gif"):
+                self._handle_gif_import(model_path, parent_empty.location)
+            else:
+                raise ValueError("Unsupported file format")
+            model_objs = bpy.context.selected_objects
+            for obj in model_objs:
+                if obj.parent is None:
+                    obj.parent = parent_empty
+                    obj.matrix_parent_inverse = parent_empty.matrix_world.inverted()
+            return model_objs
+        except Exception as e:
+            print(f"Failed to import model: {e}")
+            return None
+
+    def _setup_json_props(self, obj, ar_obj):
+        """設置物件的 JSON 屬性"""
+        if not hasattr(obj, "json_props"):
+            return
+        obj.json_props.json_data = json.dumps(ar_obj)
+        sync_from_json(obj.name, ar_obj['model']['type'])
+
+    def _transform_location(self, location):
+        """轉換位置坐標（Y-Up 到 Z-Up）"""
+        return (location['x'], location['z'] * -1, location['y'])
+
+    def _transform_rotation(self, location):
+        """轉換旋轉角度（Y-Up 到 Z-Up）"""
+        return tuple(map(math.radians, (location['rotate_x'], location['rotate_z'], location['rotate_y']*-1)))
+
+    def _transform_scale(self, zoom):
+        """轉換縮放比例（Y-Up 到 Z-Up）"""
+        return (zoom['x'], zoom['z'], zoom['y'])
+
+    def _handle_gif_import(self, gif_path, plane_location):
+        """處理 GIF 文件的導入"""
+        try:
+            temp_dir = self._prepare_gif_handling(gif_path)
+            frame_paths = self._extract_frames_from_gif(gif_path, temp_dir)
+            self._import_image_sequence_as_plane(frame_paths, plane_location)
+        except Exception as e:
+            print(f"Failed to handle GIF import: {e}")
+
+    def _prepare_gif_handling(self, gif_path):
+        """準備 GIF 文件的暫存路徑"""
+        if not gif_path.lower().endswith(".gif"):
+            raise ValueError("This is not a GIF file.")
+        work_dir = os.path.join(os.path.dirname(gif_path), "temp_gif_frames")
+        os.makedirs(work_dir, exist_ok=True)
+        return work_dir
+
+    def _extract_frames_from_gif(self, gif_path, output_dir):
+        """從 GIF 文件中提取幀"""
+        gif = Image.open(gif_path)
+        frame_count = gif.n_frames
+        frame_paths = []
+        for frame in range(frame_count):
+            gif.seek(frame)
+            frame_path = os.path.join(output_dir, f"frame_{frame:03d}.png")
+            gif.save(frame_path, "PNG")
+            frame_paths.append(frame_path)
+
+        return frame_paths
+
+    def _import_image_sequence_as_plane(self, frame_paths, plane_location):
+        try:
+            # 添加平面
+            bpy.ops.mesh.primitive_plane_add(size=1, location=plane_location)
+            plane = bpy.context.selected_objects[0]
+            # 创建材质
+            material = bpy.data.materials.new(name="ImageSequenceMaterial")
+            material.use_nodes = True
+            plane.data.materials.append(material)   # 將材質附加到平面
+
+            # 獲取材質節點樹
+            node_tree = material.node_tree
+            nodes = node_tree.nodes
+
+            # 查找 Principled BSDF 和 Image Texture 节点
+            for node in nodes:
+                nodes.remove(node)
+            
+            tex_image = nodes.new(type="ShaderNodeTexImage")
+            tex_image.location = (-300, 0)
+
+            bsdf_node = nodes.new(type="ShaderNodeBsdfPrincipled")
+            bsdf_node.location = (0, 0)
+
+            output_node = nodes.new(type="ShaderNodeOutputMaterial")
+            output_node.location = (300, 0)
+
+            # 连接节点
+            node_tree.links.new(tex_image.outputs["Color"], bsdf_node.inputs["Base Color"])
+            node_tree.links.new(tex_image.outputs["Alpha"], bsdf_node.inputs["Alpha"])
+            node_tree.links.new(bsdf_node.outputs["BSDF"], output_node.inputs["Surface"])
+                        
+            # 加載第一幀影像
+            first_image = frame_paths[0]
+            image = bpy.data.images.load(first_image)
+            tex_image.image = image
+
+            # 調整平面比例以匹配影像
+            print(f'plane: {plane}')           
+            print(f'image: {image}')   
             width, height = image.size
             aspect_ratio = width / height
-
             # 設定平面比例
             plane.scale = Vector((aspect_ratio, 1, 1))
             plane.rotation_euler[0] = radians(90)
             bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+            print(width,height)
+            # self._adjust_image_dimensions(plane, image)
+            # 確保所有影像路徑加入影像序列
+            for frame_path in frame_paths:
+                bpy.data.images.load(frame_path, check_existing=True)
 
-        def import_image_sequence_as_plane(frame_paths, plane_location=(0, 0, 0)):
-            """
-            將影像序列應用到單一平面，並設置為動畫材質
-            """
-            try:
-                    
-                # 新增平面
-                bpy.ops.mesh.primitive_plane_add(size=1, location=plane_location)
-                # bpy.ops.mesh.primitive_plane_add(size=2, calc_uvs=True, enter_editmode=False, align='WORLD', location=(0, 0, 0), rotation=(0, 0, 0), scale=(0, 0, 0))
-                plane = bpy.context.selected_objects[0]
-                # 建立新材質
-                material = bpy.data.materials.new(name="ImageSequenceMaterial")
-                material.use_nodes = True  # 啟用節點
-                plane.data.materials.append(material)  # 將材質附加到平面
-                # 獲取材質節點樹
-                node_tree = material.node_tree
-                nodes = node_tree.nodes
+            tex_image.image.source = 'SEQUENCE'
+            tex_image.image_user.frame_start = 1
+            tex_image.image_user.frame_duration = len(frame_paths)
+            tex_image.image_user.use_cyclic = True
+            tex_image.image_user.use_auto_refresh = True
+            tex_image.image_user.frame_offset = -1
 
-                # 刪除默認的 BSDF 節點並重新創建
-                for node in nodes:
-                    nodes.remove(node)
-                output_node = nodes.new(type="ShaderNodeOutputMaterial")
-                output_node.location = (300, 0)
-                bsdf_node = nodes.new(type="ShaderNodeBsdfPrincipled")
-                bsdf_node.location = (0, 0)
-                node_tree.links.new(bsdf_node.outputs["BSDF"], output_node.inputs["Surface"])
-                # 添加影像序列節點
-                tex_image = nodes.new(type="ShaderNodeTexImage")
-                tex_image.location = (-300, 0)
-                # 加載第一幀影像
-                first_frame_path = frame_paths[0]
-                image = bpy.data.images.load(first_frame_path)
-                tex_image.image = image
-                # 調整平面比例以匹配影像
-                adjust_image_dimensions(plane, image)
-
-                # 確保所有影像路徑加入影像序列
-                for frame_path in frame_paths:
-                    bpy.data.images.load(frame_path, check_existing=True)
-
-                image.source = 'SEQUENCE'  # 設置為影像序列
-                # image.frame_start = 1  # 動畫從第 1 幀開始
-                nodes["Image Texture"].image_user.frame_start = 1
-                nodes["Image Texture"].image_user.frame_duration = len(frame_paths)
-                nodes["Image Texture"].image_user.use_cyclic = True
-                nodes["Image Texture"].image_user.use_auto_refresh = True
-                nodes["Image Texture"].image_user.frame_offset = -1
-
-                # 連接影像節點到 BSDF 節點
-                node_tree.links.new(tex_image.outputs["Color"], bsdf_node.inputs["Base Color"])
-                node_tree.links.new(tex_image.outputs["Alpha"], bsdf_node.inputs["Alpha"])
-                material.blend_method = 'BLEND'
-
-                print(f"成功匯入影像序列至單一平面，共 {len(frame_paths)} 張圖片")
-            except Exception as e:
-                print(f"函式內部發生錯誤: {e}")
-
-        def handle_gif_import(gif_path, plane_location=(0, 0, 0)):
-            """
-            將 GIF 動畫拆解為影像序列並導入 Blender
-            """    
-            try:
-                # 準備暫存資料夾
-                temp_dir = prepare_gif_handling(gif_path)
-                
-                # 拆解 GIF 為影像序列
-                frame_paths = extract_frames_from_gif(gif_path, temp_dir)
-                
-                # 匯入影像序列到平面
-                import_image_sequence_as_plane(frame_paths, plane_location)
-                
-                # 可選：清理暫存影像
-                # cleanup_temp_files(temp_dir)
-                # print('4-完成影像暫存清理')
-                print("GIF 匯入成功！")
-            except Exception as e:
-                print(f"GIF 匯入失敗: {e}")
-
-        def import_model(model_path, model_name, parent_empty):
-            file_name = os.path.basename(model_path)
-            folder_path = os.path.dirname(model_path)
-            try:
-                lower_model_path = model_path.lower()
-                if lower_model_path.endswith(".glb"):
-                    # bpy.ops.import_scene.gltf(filepath="/var/folders/6z/97v_b4sx1bb1byv856nrq23r0000gn/T/f0433jf119t8eod5j7wntginq92x.glb", files=[{"name":"f0433jf119t8eod5j7wntginq92x.glb", "name":"f0433jf119t8eod5j7wntginq92x.glb"}], loglevel=20)
-                    bpy.ops.import_scene.gltf( 
-                        filepath=model_path, 
-                        export_import_convert_lighting_mode='SPEC', 
-                        filter_glob='*.glb;*.gltf',
-                        loglevel=20, 
-                        import_pack_images=True, 
-                        merge_vertices=True, 
-                        import_shading='NORMALS', 
-                        bone_heuristic='TEMPERANCE', 
-                        guess_original_bind_pose=False, 
-                        import_webp_texture=False
-                    )                        
-                    print(f'{model_name} glb建立完成')
-                elif lower_model_path.endswith(".mp4") or lower_model_path.endswith(".mov"):
-                    bpy.ops.image.import_as_mesh_planes(relative=False, filepath=model_path, files=[{"name":file_name, "name":file_name}], directory=folder_path)   #for blender 4.3
-                    # bpy.ops.image.import_as_mesh_planes(relative=False, filepath="/Users/henry642/Downloads/1.png", files=[{"name":os.path.basename(model_path), "name":os.path.basename(model_path)}], directory=os.path.dirname(model_path), align_axis='+Z')
-                    video_obj = bpy.context.selected_objects[0]  
-                    if video_obj.type == 'MESH':
-                        video_texture = video_obj.active_material.node_tree.nodes.get("Image Texture")
-                        if video_texture and video_texture.image:
-                            video_width = video_texture.image.size[0]
-                            video_height = video_texture.image.size[1]
-                            print(f'{model_name}影片解析度：{video_width}x{video_height}')
-
-                            video_max_dim = max(video_width,video_height)
-                            video_obj_dimx = video_width/video_max_dim
-                            video_obj_dimy = video_height/video_max_dim
-                            video_obj.dimensions = Vector((video_obj_dimx,video_obj_dimy,0))
-                            print(f'dimensions為{video_obj.dimensions}')
-                        else:
-                            print(f'無法獲取{model_name}的材質或影像資訊')                      
-                    # Blender新建物件的初始數據與lightspace匹配
-                    video_obj.rotation_euler[0] = radians(90)
-                    bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
-                    print(f'{model_name} 建立完成')                    
-
-                elif lower_model_path.endswith(".png") or lower_model_path.endswith(".jpg") or lower_model_path.endswith(".jpeg") or lower_model_path.endswith(".webp"):                    
-                    # 將圖像導入平面
-                    # bpy.ops.import_image.to_plane(files=[{"name": os.path.basename(model_path), "relative_path": False}], directory=os.path.dirname(model_path), align_axis='Z+')
-                    bpy.ops.image.import_as_mesh_planes(relative=False, filepath=model_path, files=[{"name":file_name, "name":file_name}], directory=folder_path)   #for blender 4.3
-                    # 將長寬值高者normalize 1公尺
-                    img_obj = bpy.context.selected_objects[0]
-                    if img_obj.type == 'MESH':                  
-                        img_max_dim = max(img_obj.dimensions[0], img_obj.dimensions[1])
-                        img_obj_dimx = img_obj.dimensions[0]/img_max_dim
-                        img_obj_dimy = img_obj.dimensions[1]/img_max_dim
-                        img_obj.dimensions = Vector((img_obj_dimx,img_obj_dimy,0))
-                    
-                    # Blender新建物件的初始數據與lightspace匹配
-                        img_obj.rotation_euler[0] = radians(90)
-                        bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
-                        print(f'{model_name} 建立完成')
-
-                    else:
-                        print(f"Failed to normalize image size for {model_name}: {img_obj.name} is not a mesh")
-                        return None
-
-                elif lower_model_path.endswith(".gif"):
-                    # 特殊處理 GIF 檔案
-                    handle_gif_import(model_path, parent_empty.location)
-                    print(f'{model_name} GIF 處理完成')
-
-                else:
-                    raise ValueError("Unsupported file format")
-                    
-                # 設置導入對象的父對象
-                model_objs = bpy.context.selected_objects
-                for model_obj in model_objs:
-                    if model_obj.parent is None:
-                        set_parent(model_obj, parent_empty)
-
-                return model_objs
-          
-            except ValueError as e:
-                print(e)
-                return None            
-
-        def set_parent(child, parent):
-            child.parent = parent
-            child.matrix_parent_inverse = parent.matrix_world.inverted() #讓設定父子階時不改變位置關係       
-        
-        def import_objects(ar_obj,model_path,name,location,rotation,scale):
-            if os.path.exists(model_path):
-                # 創建一個空對象並將其設置為模型對象的父對象
-                empty_obj = create_empty_object(name)  # name
-                model_obj = import_model(model_path,name, empty_obj) # file , name , empty 
-                set_empty_object(empty_obj, location, rotation, scale) # transform
-
-                bpy.ops.loaddon.message('INVOKE_DEFAULT', message = '下載完成: {}'.format(name))
-
-            else:
-                print(f"Skipping missing file: {model_path}")
-        
-        def assign_material(plane, image_path):
-            material_name = os.path.splitext(os.path.basename(image_path))[0]
+            for node in nodes:
+                if node.type == 'BSDF_PRINCIPLED':
+                    principled_bsdf = node
             
-            # 創建新材質
-            material = bpy.data.materials.new(name=material_name)
-            material.use_nodes = True
-            bsdf_node = material.node_tree.nodes["Principled BSDF"]
-            
-            # 加載圖片紋理
-            image_file = client.download(image_path)
-            image_path = image_file.name
-            image_dir = os.path.dirname(image_file.name)
-            image = bpy.data.images.load(image_path)
-            image_node = material.node_tree.nodes.new(type="ShaderNodeTexImage")
-            image_node.image = image
-            
-            # 連接圖片節點到 BSDF 節點
-            material.node_tree.links.new(image_node.outputs[0], bsdf_node.inputs["Base Color"])
-            
-            # 连接图片节点的 alpha 输出到 BSDF 节点的 alpha 输入
-            material.node_tree.links.new(image_node.outputs[1], bsdf_node.inputs["Alpha"])
-            
-            # 將材質分配給對象
-            if len(plane.data.materials) == 0:
-                plane.data.materials.append(material)
-            else:
-                plane.data.materials[0] = material
-                
-            # 设置 Blend Mode 为 Alpha Blend
+            print("Principled BSDF 输入插槽:")
+            for input in principled_bsdf.inputs:
+                print(f"- {input.name}")
+
+            print("Image Texture 输出插槽:")
+            for output in tex_image.outputs:
+                print(f"- {output.name}")
+
             material.blend_method = 'BLEND'
+            print(f'成功匯入影像序列至單一平面，共{len(frame_paths)}張圖片')
+        except Exception as e:
+            print(f'函式內部發生錯誤：{e}')
 
-        def create_plane(name, width, height, location, rotation_x, rotation_z, image_path):
-            # image_path = 'https://api.lig.com.tw/ar_asset/voa4l7bpqzvilb2ycylpv1btd4r9.png'
-            bpy.ops.mesh.primitive_plane_add(size=1, enter_editmode=False, align='WORLD', location=location)
-            plane = bpy.context.active_object
-            plane.name = name
-            plane.scale = (width, height, 1)
+    def _adjust_image_dimensions(plane, image):
+        """
+        調整平面的大小以匹配影像的長寬比例
+        """
+        # 計算影像比例
+        width, height = image.size
+        print(width,height)
+        aspect_ratio = width / height
+
+        # 設定平面比例
+        plane.scale = Vector((aspect_ratio, 1, 1))
+        plane.rotation_euler[0] = radians(90)
+        bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        # bpy.context.scene.cursor.location = (0, 0, 0) #cursor歸零
+        # set_save_path = context.scene.save_path #儲存路徑
+
+        # if set_save_path != "":
+        #     if os.path.exists(set_save_path):
+        #         print("輸出路徑: ", set_save_path)
+        #     else:
+        #         self.report({'ERROR'}, "Output path does not exist. Please reset it.")
+        #         return {'CANCELLED'}
+        # else:
+        #     self.report({'ERROR'}, "Save path not set.")
+        #     return {'CANCELLED'}
+
+        # def create_empty_object(name, parent=None):
+        #     # 取消選取所有物件，不使用 bpy.ops
+        #     for obj in bpy.context.selected_objects:
+        #         obj.select_set(False)
             
-            # 旋轉90度，使其垂直於XY平面
-            plane.rotation_euler.x = math.radians(90) + rotation_x
+        #     # 創建空物件
+        #     empty_obj = bpy.data.objects.new(name, None)
+        #     bpy.context.collection.objects.link(empty_obj) #將empty_obj添加至當前collection
+        #     empty_obj.location = (0, 0, 0)
+        #     empty_obj.scale = (1, 1, 1)
+
+        #     if parent is not None:
+        #         empty_obj.parent = parent
+        #     return empty_obj
             
-            # 使plane與環形相切
-            plane.rotation_euler.z = rotation_z
-            
-            # 將旋轉應用到plane對象上
-            bpy.context.view_layer.objects.active = plane
-            bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
-            
-            # 為 plane 分配貼圖
-            assign_material(plane, image_path)
-            
-            return plane
+        # def set_empty_object(empty_obj, location, rotation, scale):
+        #     # 取消選取所有物件，避免使用 bpy.ops
+        #     for obj in bpy.context.selected_objects:
+        #         obj.select_set(False)
 
-        def create_ring_of_planes(num_layers, num_planes, width, height, plane_gaps, layer_gap, rotation_x_values, image_paths, parent_obj=None):
-            """
-            創建多層環形平面結構，每層包含多個平面，並應用對應的圖片。可選擇設置父物件。
-            """
-            print(num_layers,num_planes,len(image_paths))
-            if len(image_paths) != num_layers * num_planes:
-                #raise ValueError("圖片數量必須等於層數與平面數的乘積")
-                print('圖片數量必須等於層數與平面數的乘積')
+        #     empty_obj.rotation_mode = 'XYZ'  # 指定欧拉角的旋转模式
+        #     empty_obj.rotation_euler = (radians(rotation[0]), radians(rotation[1]), radians(rotation[2]))  # 将度数转换为弧度
+        #     empty_obj.location = location
+        #     empty_obj.scale = scale
+        #     #empty_obj.name = name   #henry  
+        #     return empty_obj
 
-            angle_step = 2 * math.pi / num_planes
-            rotation_x_values_radians = [math.radians(angle) for angle in rotation_x_values[::-1]]
-            planes = []
+        # def extract_frames_from_gif(gif_path, output_dir):
+        #     """將 GIF 拆解為影像序列"""
+        #     gif = Image.open(gif_path)
+        #     frame_count = gif.n_frames
+        #     frame_paths = []
+        #     print(f'總共有{frame_count}個檔案')
+        #     for frame in range(frame_count):
+        #         gif.seek(frame)
+        #         frame_path = os.path.join(output_dir, f"frame_{frame:03d}.png")
+        #         gif.save(frame_path, "PNG")
+        #         frame_paths.append(frame_path)
+        #         print(f'第{frame}個gif檔案位置為{frame_path}')
+                       
+        #     return frame_paths
 
-            for layer_index in range(num_layers):
-                radius = (width + plane_gaps[layer_index]) * num_planes / (2 * math.pi)
-                for i in range(num_planes):
-                    angle = i * angle_step
-                    x = radius * math.cos(angle)
-                    y = radius * math.sin(angle)
-                    z = layer_index * (height + layer_gap) - (height + layer_gap) * (num_layers - 1) / 2
-                    plane_name = f"Plane_L{layer_index + 1}_{i + 1}"
-                    rotation_z = angle + math.pi / 2
-                    image_path = image_paths[layer_index * num_planes + i]
-                    plane = create_plane(plane_name, width, height, (x, y, z), rotation_x_values_radians[layer_index], rotation_z, image_path)
+        # def prepare_gif_handling(gif_path):
+        #     """檢查 GIF 文件並建立暫存路徑"""
+        #     if not gif_path.lower().endswith(".gif"):
+        #         raise ValueError("This is not a GIF file.")
+        #     work_dir = os.path.join(os.path.dirname(gif_path), "temp_gif_frames")
+        #     os.makedirs(work_dir, exist_ok=True)
+        #     print(f"work_dir is {work_dir}")
+        #     return work_dir
 
-                    if parent_obj:
-                        plane.parent = parent_obj  # 自動設置父物件
-                    planes.append(plane)
-                    print(f'完成P{layer_index}的{i}')
+        # def adjust_image_dimensions(plane, image):
+        #     """
+        #     調整平面的大小以匹配影像的長寬比例
+        #     """
+        #     if image is None or image.size[0] == 0 or image.size[1] == 0:
+        #         return
 
-            return planes
+        #     # 計算影像比例
+        #     width, height = image.size
+        #     aspect_ratio = width / height
 
-        def extract_url(ar_obj):
-            """從 ar_obj 中提取有效的 URL"""
-            textures = [ar_obj['model'].get(key) for key in ('texture', 'ios_texture', 'android_texture')]      
-            for texture in textures:
-                if texture and texture.get('url'):
-                    return texture['url']
-            return None
+        #     # 設定平面比例
+        #     plane.scale = Vector((aspect_ratio, 1, 1))
+        #     plane.rotation_euler[0] = radians(90)
+        #     bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
 
-        def save_data_to_json(file_path, data):
-            """將數據保存為格式化的 JSON 文件"""
-            try:
-                with open(file_path, 'w') as f:
-                    print(json.dumps(data, ensure_ascii=False, indent=4), file=f)
-            except (IOError, TypeError, ValueError) as e:
-                print(f"保存數據時出錯: {e}")
-
-        def file_name_set(name):
-            """生成文件名"""
-            return f"{name}.json"
-
-        def process_arinfoballv1_object(ar_obj, context, name, location, rotation,scale, transparency, actions, events):
-                    """處理3D對象，提取必要數據並保存為 JSON 文件"""
-                    url = extract_url(ar_obj)
-                    if not url:
-                        bpy.ops.loaddon.message('INVOKE_DEFAULT', message=f"No URL is found in {ar_obj['id']}")
-                        return
-
-                    # 提取動畫參數
-                    arinfoballv1_params = extract_arinfoballv1_params(ar_obj['model'].get('fields', {}))
-
-                    # 設置文件路徑
-                    file_name = file_name_set(name)
-                    full_path = os.path.join(context.scene.save_path, file_name)
-
-                    # 構建數據字典
-                    data = {
-                        'name': name,
-                        'loading': name,
-                        'type': ar_obj['model'].get('type'),
-                        'location': location,
-                        'rotation': rotation,
-                        'scale': scale,
-                        'transparency':transparency,
-                        'ar_obj': ar_obj,
-                        'actions': actions,
-                        'events': events,
-                        'url': url,  # 將提取到的 URL 加入字典
-                        **arinfoballv1_params  # 展開動畫參數字典
-                    }
-
-                    # 保存數據
-                    save_data_to_json(full_path, data)
-
-                    if name in bpy.data.objects:
-                        print(f"{name} 場景已有同名物件，將進行屬性更新")
-                        obj = bpy.data.objects[name]
-                        # 更新屬性：位置、旋轉、縮放等
-                        obj.location = location
-                        obj.rotation_euler = tuple(map(math.radians, rotation))
-                        obj.scale = scale
-                        # 確保物件被添加到指定集合
-                        object_to_collection(obj, parent_collection)
-
-                    else:
-                        # 若無相同名稱物件，下載並創建新物件
-                        ar_file = client.download(url)
-                        if ar_file:
-                            empty_InfoBall = create_empty_object(name, parent=None)
-                            location_cor = (ar_obj['location']['x'],ar_obj['location']['z']*-1,ar_obj['location']['y']++(arinfoballv1_params['plane_height'] + arinfoballv1_params['layer_gap'] / 2) * ar_obj['zoom']['y'])
-                            set_empty_object(empty_InfoBall, location_cor, rotation, scale)
-
-                            # 生成和附加層平面
-                            create_info_sphere_layers(empty_InfoBall, arinfoballv1_params)
-                            obj = bpy.data.objects.get(name)
-                            if obj:
-                                object_to_collection(obj, parent_collection)
-                                print(f"資訊球 '{name}' 已成功導入並配置完成")
-                        else:
-                            bpy.ops.loaddon.message('INVOKE_DEFAULT', message=f"Unable to download model for {name}")
-
-        def create_info_sphere_layers(parent_obj, params):
-            """
-            創建多層資訊球環結構，並將所有平面設置為 parent_obj 的子級。
-            """
-            num_layers = params['num_layers']
-            num_planes = params['num_planes']
-            plane_width = params['plane_width']
-            plane_height = params['plane_height']
-            plane_gaps = params['plane_gaps']
-            layer_gap = params['layer_gap']
-            rotation_x_values = params['rotation_x_values']
-            image_paths = params['image_paths']
-            
-            all_planes = create_ring_of_planes(
-                num_layers=num_layers, 
-                num_planes=num_planes, 
-                width=plane_width, 
-                height=plane_height,
-                plane_gaps=plane_gaps, 
-                layer_gap=layer_gap, 
-                rotation_x_values=rotation_x_values,
-                image_paths=image_paths,
-                parent_obj=parent_obj  # 新增的參數，直接設置每個平面的父物件
-            )
-            return all_planes
-
-        client = LigDataApi.ApiClient.shared()
-        # 確保用戶已登錄
-        if not client.authenticated():  # 檢查是否已登錄
-            self.report({'ERROR'}, "Login to LiG Cloud first")
-            return {'CANCELLED'}                 
-        ar_objects = client.download_ar_objects(context.scene.lig_scene)   
-        parent_col_name = context.scene.lig_scene # 確保所有下載的AR對象被統一存放在parent_col collection中，方便管理
-        parent_collection = bpy.data.collections.get(parent_col_name) or CreateCollection.create_collection(parent_col_name)
-        ar_objects_count = len(ar_objects)
-        print("ar_objects 物件數量:",ar_objects_count)
-        for i, ar_obj in enumerate(ar_objects,1):
-            print(f'ar_obj-{i}:{ar_obj}')
-
-        collection_name = parent_col_name  # 請替換為您的集合名稱
-        Collection_objects_count = count_objects_in_collection(collection_name)
-
-        if set_save_path != '':     
-            if os.path.exists(set_save_path):  
-                for ar_obj in ar_objects:  #ar_obj is dict
-                    download_url = extract_url(ar_obj)
-                    if not download_url:
-                        self.report({'WARNING'}, f"No URL found for object {ar_obj['id']}")
-                        continue                    
-                    # 設置文件路徑
-                    obj_name = str(ar_obj['id'])+"-"+ar_obj['name']
-                    obj_type = ar_obj['model']['type']
-                    file_name = f"{obj_name}.json"
-                    full_path = os.path.join(context.scene.save_path, file_name)
-                    # 保存數據
+        # def import_image_sequence_as_plane(frame_paths, plane_location=(0, 0, 0)):
+        #     """
+        #     將影像序列應用到單一平面，並設置為動畫材質
+        #     """
+        #     try:
                     
-                    if obj_name in bpy.data.objects:  #如果物件已經存在，進行屬性更新
-                        print(f"{obj_name} The scene already has an object with the same name and will be updated with new propertues.")
-                        obj = bpy.data.objects[obj_name]
-                        obj.location = (ar_obj['location']['x'],ar_obj['location']['z']*-1,ar_obj['location']['y'])
-                        obj.rotation_euler = tuple(map(math.radians, (ar_obj['location']['rotate_x'],ar_obj['location']['rotate_z']*-1,ar_obj['location']['rotate_y'])))
-                        obj.scale = (ar_obj['zoom']['x'],ar_obj['zoom']['z'],ar_obj['zoom']['y'])          
-                        obj.json_props.json_data = json.dumps(ar_obj)
-                        obj_name = obj.json_props.obj_name
-                        sync_from_json(obj_name,obj_type)
-                        save_json_to_file(obj, full_path)
-                    else:   # 若無相同名稱物件，下載並創建新物件
-                        ar_file = client.download(download_url)
-                        if ar_file:
-                            model_path = ar_file.name
-                            location = (ar_obj['location']['x'],ar_obj['location']['z']*-1,ar_obj['location']['y'])
-                            rotation = tuple(map(math.radians, (ar_obj['location']['rotate_x'],ar_obj['location']['rotate_z']*-1,ar_obj['location']['rotate_y'])))
-                            scale = (ar_obj['zoom']['x'],ar_obj['zoom']['z'],ar_obj['zoom']['y'])
-                            if obj_type == ARObjectType.ARINFOBALL.value:
-                                plane_height = ar_obj['model'].get('fields', {})['plane_height']
-                                layer_gap = ar_obj['model'].get('fields', {})['layer_gap']
-                                empty_InfoBall = create_empty_object(obj_name, parent=None)
-                                location_cor = (ar_obj['location']['x'], ar_obj['location']['z']*-1, (ar_obj['location']['y']+ plane_height+ layer_gap / 2) * ar_obj['zoom']['y'])
-                                set_empty_object(empty_InfoBall, location_cor, rotation, scale)             
-                            else:
-                                import_objects(ar_obj, model_path, obj_name, location, rotation, scale)
-                            obj = bpy.data.objects.get(obj_name)
-                            # Step1: ar_obj 寫進json_data
-                            # 把ar_obj資料寫進 json_data裡面
-                            # =====================================================
-                            #完成json_data的初始化
-                            # =====================================================
-                            obj.json_props.json_data = json.dumps(ar_obj)  #把ar_obj轉為字串存到json_data完成初始化
-                            # Step2: json_data資料寫進 props
-                            sync_from_json(obj_name,obj_type)
-                            print('json_data')
-                            print(obj.json_props.json_data)
-                            # step3: 存json檔
-                            save_json_to_file(obj, full_path)
-                            if obj:
-                                object_to_collection(obj, parent_collection)
-                        else:
-                            bpy.ops.loaddon.message('INVOKE_DEFAULT', message=f"Unable to download model for {obj_name}")
+        #         # 新增平面
+        #         bpy.ops.mesh.primitive_plane_add(size=1, location=plane_location)
+        #         # bpy.ops.mesh.primitive_plane_add(size=2, calc_uvs=True, enter_editmode=False, align='WORLD', location=(0, 0, 0), rotation=(0, 0, 0), scale=(0, 0, 0))
+        #         plane = bpy.context.selected_objects[0]
+        #         # 建立新材質
+        #         material = bpy.data.materials.new(name="ImageSequenceMaterial")
+        #         material.use_nodes = True  # 啟用節點
+        #         plane.data.materials.append(material)  # 將材質附加到平面
+        #         # 獲取材質節點樹
+        #         node_tree = material.node_tree
+        #         nodes = node_tree.nodes
+
+        #         # 刪除默認的 BSDF 節點並重新創建
+        #         for node in nodes:
+        #             nodes.remove(node)
+        #         output_node = nodes.new(type="ShaderNodeOutputMaterial")
+        #         output_node.location = (300, 0)
+        #         bsdf_node = nodes.new(type="ShaderNodeBsdfPrincipled")
+        #         bsdf_node.location = (0, 0)
+        #           
+        #         # 添加影像序列節點
+        #         tex_image = nodes.new(type="ShaderNodeTexImage")
+        #         tex_image.location = (-300, 0)
+        #         # 加載第一幀影像
+        #         first_frame_path = frame_paths[0]
+        #         image = bpy.data.images.load(first_frame_path)
+        #         tex_image.image = image
+        #         # 調整平面比例以匹配影像
+        #         adjust_image_dimensions(plane, image)
+
+        #         # 確保所有影像路徑加入影像序列
+        #         for frame_path in frame_paths:
+        #             bpy.data.images.load(frame_path, check_existing=True)
+
+        #         image.source = 'SEQUENCE'  # 設置為影像序列
+        #         # image.frame_start = 1  # 動畫從第 1 幀開始
+        #         nodes["Image Texture"].image_user.frame_start = 1
+        #         nodes["Image Texture"].image_user.frame_duration = len(frame_paths)
+        #         nodes["Image Texture"].image_user.use_cyclic = True
+        #         nodes["Image Texture"].image_user.use_auto_refresh = True
+        #         nodes["Image Texture"].image_user.frame_offset = -1
+
+        #         # 連接影像節點到 BSDF 節點
+        #         node_tree.links.new(tex_image.outputs["Color"], bsdf_node.inputs["Base Color"])
+        #         node_tree.links.new(tex_image.outputs["Alpha"], bsdf_node.inputs["Alpha"])
+        #         material.blend_method = 'BLEND'
+
+        #         print(f"成功匯入影像序列至單一平面，共 {len(frame_paths)} 張圖片")
+        #     except Exception as e:
+        #         print(f"函式內部發生錯誤: {e}")
+
+        # def handle_gif_import(gif_path, plane_location=(0, 0, 0)):
+        #     """
+        #     將 GIF 動畫拆解為影像序列並導入 Blender
+        #     """    
+        #     try:
+        #         # 準備暫存資料夾
+        #         temp_dir = prepare_gif_handling(gif_path)
+                
+        #         # 拆解 GIF 為影像序列
+        #         frame_paths = extract_frames_from_gif(gif_path, temp_dir)
+                
+        #         # 匯入影像序列到平面
+        #         import_image_sequence_as_plane(frame_paths, plane_location)
+                
+        #         # 可選：清理暫存影像
+        #         # cleanup_temp_files(temp_dir)
+        #         # print('4-完成影像暫存清理')
+        #         print("GIF 匯入成功！")
+        #     except Exception as e:
+        #         print(f"GIF 匯入失敗: {e}")
+
+        # def import_model(model_path, model_name, parent_empty):
+        #     file_name = os.path.basename(model_path)
+        #     folder_path = os.path.dirname(model_path)
+        #     try:
+        #         lower_model_path = model_path.lower()
+        #         if lower_model_path.endswith(".glb"):
+        #             # bpy.ops.import_scene.gltf(filepath="/var/folders/6z/97v_b4sx1bb1byv856nrq23r0000gn/T/f0433jf119t8eod5j7wntginq92x.glb", files=[{"name":"f0433jf119t8eod5j7wntginq92x.glb", "name":"f0433jf119t8eod5j7wntginq92x.glb"}], loglevel=20)
+        #             bpy.ops.import_scene.gltf( 
+        #                 filepath=model_path, 
+        #                 export_import_convert_lighting_mode='SPEC', 
+        #                 filter_glob='*.glb;*.gltf',
+        #                 loglevel=20, 
+        #                 import_pack_images=True, 
+        #                 merge_vertices=True, 
+        #                 import_shading='NORMALS', 
+        #                 bone_heuristic='TEMPERANCE', 
+        #                 guess_original_bind_pose=False, 
+        #                 import_webp_texture=False
+        #             )                        
+        #             print(f'{model_name} glb建立完成')
+        #         elif lower_model_path.endswith(".mp4") or lower_model_path.endswith(".mov"):
+        #             bpy.ops.image.import_as_mesh_planes(relative=False, filepath=model_path, files=[{"name":file_name, "name":file_name}], directory=folder_path)   #for blender 4.3
+        #             # bpy.ops.image.import_as_mesh_planes(relative=False, filepath="/Users/henry642/Downloads/1.png", files=[{"name":os.path.basename(model_path), "name":os.path.basename(model_path)}], directory=os.path.dirname(model_path), align_axis='+Z')
+        #             video_obj = bpy.context.selected_objects[0]  
+        #             if video_obj.type == 'MESH':
+        #                 video_texture = video_obj.active_material.node_tree.nodes.get("Image Texture")
+        #                 if video_texture and video_texture.image:
+        #                     video_width = video_texture.image.size[0]
+        #                     video_height = video_texture.image.size[1]
+        #                     print(f'{model_name}影片解析度：{video_width}x{video_height}')
+
+        #                     video_max_dim = max(video_width,video_height)
+        #                     video_obj_dimx = video_width/video_max_dim
+        #                     video_obj_dimy = video_height/video_max_dim
+        #                     video_obj.dimensions = Vector((video_obj_dimx,video_obj_dimy,0))
+        #                     print(f'dimensions為{video_obj.dimensions}')
+        #                 else:
+        #                     print(f'無法獲取{model_name}的材質或影像資訊')                      
+        #             # Blender新建物件的初始數據與lightspace匹配
+        #             video_obj.rotation_euler[0] = radians(90)
+        #             bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+        #             print(f'{model_name} 建立完成')                    
+
+        #         elif lower_model_path.endswith(".png") or lower_model_path.endswith(".jpg") or lower_model_path.endswith(".jpeg") or lower_model_path.endswith(".webp"):                    
+        #             # 將圖像導入平面
+        #             # bpy.ops.import_image.to_plane(files=[{"name": os.path.basename(model_path), "relative_path": False}], directory=os.path.dirname(model_path), align_axis='Z+')
+        #             bpy.ops.image.import_as_mesh_planes(relative=False, filepath=model_path, files=[{"name":file_name, "name":file_name}], directory=folder_path)   #for blender 4.3
+        #             # 將長寬值高者normalize 1公尺
+        #             img_obj = bpy.context.selected_objects[0]
+        #             if img_obj.type == 'MESH':                  
+        #                 img_max_dim = max(img_obj.dimensions[0], img_obj.dimensions[1])
+        #                 img_obj_dimx = img_obj.dimensions[0]/img_max_dim
+        #                 img_obj_dimy = img_obj.dimensions[1]/img_max_dim
+        #                 img_obj.dimensions = Vector((img_obj_dimx,img_obj_dimy,0))
                     
-                return {'FINISHED'}
-            else:
-                self.report({'ERROR'}, 'The path entered does not exist.')
-                return {'CANCELLED'}
+        #             # Blender新建物件的初始數據與lightspace匹配
+        #                 img_obj.rotation_euler[0] = radians(90)
+        #                 bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+        #                 print(f'{model_name} 建立完成')
+
+        #             else:
+        #                 print(f"Failed to normalize image size for {model_name}: {img_obj.name} is not a mesh")
+        #                 return None
+
+        #         elif lower_model_path.endswith(".gif"):
+        #             # 特殊處理 GIF 檔案
+        #             handle_gif_import(model_path, parent_empty.location)
+        #             print(f'{model_name} GIF 處理完成')
+
+        #         else:
+        #             raise ValueError("Unsupported file format")
+                    
+        #         # 設置導入對象的父對象
+        #         model_objs = bpy.context.selected_objects
+        #         for model_obj in model_objs:
+        #             if model_obj.parent is None:
+        #                 set_parent(model_obj, parent_empty)
+
+        #         return model_objs
+          
+        #     except ValueError as e:
+        #         print(e)
+        #         return None            
+
+        # def set_parent(child, parent):
+        #     child.parent = parent
+        #     child.matrix_parent_inverse = parent.matrix_world.inverted() #讓設定父子階時不改變位置關係       
+        
+        # def import_objects(ar_obj,model_path,name,location,rotation,scale):
+        #     if os.path.exists(model_path):
+        #         # 創建一個空對象並將其設置為模型對象的父對象
+        #         empty_obj = create_empty_object(name)  # name
+        #         model_obj = import_model(model_path,name, empty_obj) # file , name , empty 
+        #         set_empty_object(empty_obj, location, rotation, scale) # transform
+
+        #         bpy.ops.loaddon.message('INVOKE_DEFAULT', message = '下載完成: {}'.format(name))
+
+        #     else:
+        #         print(f"Skipping missing file: {model_path}")
+        
+        # def assign_material(plane, image_path):
+        #     material_name = os.path.splitext(os.path.basename(image_path))[0]
             
-        elif set_save_path == '':
-            self.report({'ERROR'}, 'Please set the save path first')
-            return {'CANCELLED'}
-        context.area.tag_redraw()
-        self.report({'INFO'}, "Download completed.")
-        return {'FINISHED'}
+        #     # 創建新材質
+        #     material = bpy.data.materials.new(name=material_name)
+        #     material.use_nodes = True
+        #     bsdf_node = material.node_tree.nodes["Principled BSDF"]
+            
+        #     # 加載圖片紋理
+        #     image_file = client.download(image_path)
+        #     image_path = image_file.name
+        #     image_dir = os.path.dirname(image_file.name)
+        #     image = bpy.data.images.load(image_path)
+        #     image_node = material.node_tree.nodes.new(type="ShaderNodeTexImage")
+        #     image_node.image = image
+            
+        #     # 連接圖片節點到 BSDF 節點
+        #     material.node_tree.links.new(image_node.outputs[0], bsdf_node.inputs["Base Color"])
+            
+        #     # 连接图片节点的 alpha 输出到 BSDF 节点的 alpha 输入
+        #     material.node_tree.links.new(image_node.outputs[1], bsdf_node.inputs["Alpha"])
+            
+        #     # 將材質分配給對象
+        #     if len(plane.data.materials) == 0:
+        #         plane.data.materials.append(material)
+        #     else:
+        #         plane.data.materials[0] = material
+                
+        #     # 设置 Blend Mode 为 Alpha Blend
+        #     material.blend_method = 'BLEND'
+
+        # def create_plane(name, width, height, location, rotation_x, rotation_z, image_path):
+        #     # image_path = 'https://api.lig.com.tw/ar_asset/voa4l7bpqzvilb2ycylpv1btd4r9.png'
+        #     bpy.ops.mesh.primitive_plane_add(size=1, enter_editmode=False, align='WORLD', location=location)
+        #     plane = bpy.context.active_object
+        #     plane.name = name
+        #     plane.scale = (width, height, 1)
+            
+        #     # 旋轉90度，使其垂直於XY平面
+        #     plane.rotation_euler.x = math.radians(90) + rotation_x
+            
+        #     # 使plane與環形相切
+        #     plane.rotation_euler.z = rotation_z
+            
+        #     # 將旋轉應用到plane對象上
+        #     bpy.context.view_layer.objects.active = plane
+        #     bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
+            
+        #     # 為 plane 分配貼圖
+        #     assign_material(plane, image_path)
+            
+        #     return plane
+
+        # def create_ring_of_planes(num_layers, num_planes, width, height, plane_gaps, layer_gap, rotation_x_values, image_paths, parent_obj=None):
+        #     """
+        #     創建多層環形平面結構，每層包含多個平面，並應用對應的圖片。可選擇設置父物件。
+        #     """
+        #     print(num_layers,num_planes,len(image_paths))
+        #     if len(image_paths) != num_layers * num_planes:
+        #         #raise ValueError("圖片數量必須等於層數與平面數的乘積")
+        #         print('圖片數量必須等於層數與平面數的乘積')
+
+        #     angle_step = 2 * math.pi / num_planes
+        #     rotation_x_values_radians = [math.radians(angle) for angle in rotation_x_values[::-1]]
+        #     planes = []
+
+        #     for layer_index in range(num_layers):
+        #         radius = (width + plane_gaps[layer_index]) * num_planes / (2 * math.pi)
+        #         for i in range(num_planes):
+        #             angle = i * angle_step
+        #             x = radius * math.cos(angle)
+        #             y = radius * math.sin(angle)
+        #             z = layer_index * (height + layer_gap) - (height + layer_gap) * (num_layers - 1) / 2
+        #             plane_name = f"Plane_L{layer_index + 1}_{i + 1}"
+        #             rotation_z = angle + math.pi / 2
+        #             image_path = image_paths[layer_index * num_planes + i]
+        #             plane = create_plane(plane_name, width, height, (x, y, z), rotation_x_values_radians[layer_index], rotation_z, image_path)
+
+        #             if parent_obj:
+        #                 plane.parent = parent_obj  # 自動設置父物件
+        #             planes.append(plane)
+        #             print(f'完成P{layer_index}的{i}')
+
+        #     return planes
+
+        # def extract_url(ar_obj):
+        #     """從 ar_obj 中提取有效的 URL"""
+        #     textures = [ar_obj['model'].get(key) for key in ('texture', 'ios_texture', 'android_texture')]      
+        #     for texture in textures:
+        #         if texture and texture.get('url'):
+        #             return texture['url']
+        #     return None
+
+        # def save_data_to_json(file_path, data):
+        #     """將數據保存為格式化的 JSON 文件"""
+        #     try:
+        #         with open(file_path, 'w') as f:
+        #             print(json.dumps(data, ensure_ascii=False, indent=4), file=f)
+        #     except (IOError, TypeError, ValueError) as e:
+        #         print(f"保存數據時出錯: {e}")
+
+        # def file_name_set(name):
+        #     """生成文件名"""
+        #     return f"{name}.json"
+
+        # def process_arinfoballv1_object(ar_obj, context, name, location, rotation,scale, transparency, actions, events):
+        #             """處理3D對象，提取必要數據並保存為 JSON 文件"""
+        #             url = extract_url(ar_obj)
+        #             if not url:
+        #                 bpy.ops.loaddon.message('INVOKE_DEFAULT', message=f"No URL is found in {ar_obj['id']}")
+        #                 return
+
+        #             # 提取動畫參數
+        #             arinfoballv1_params = extract_arinfoballv1_params(ar_obj['model'].get('fields', {}))
+
+        #             # 設置文件路徑
+        #             file_name = file_name_set(name)
+        #             full_path = os.path.join(context.scene.save_path, file_name)
+
+        #             # 構建數據字典
+        #             data = {
+        #                 'name': name,
+        #                 'loading': name,
+        #                 'type': ar_obj['model'].get('type'),
+        #                 'location': location,
+        #                 'rotation': rotation,
+        #                 'scale': scale,
+        #                 'transparency':transparency,
+        #                 'ar_obj': ar_obj,
+        #                 'actions': actions,
+        #                 'events': events,
+        #                 'url': url,  # 將提取到的 URL 加入字典
+        #                 **arinfoballv1_params  # 展開動畫參數字典
+        #             }
+
+        #             # 保存數據
+        #             save_data_to_json(full_path, data)
+
+        #             if name in bpy.data.objects:
+        #                 print(f"{name} 場景已有同名物件，將進行屬性更新")
+        #                 obj = bpy.data.objects[name]
+        #                 # 更新屬性：位置、旋轉、縮放等
+        #                 obj.location = location
+        #                 obj.rotation_euler = tuple(map(math.radians, rotation))
+        #                 obj.scale = scale
+        #                 # 確保物件被添加到指定集合
+        #                 object_to_collection(obj, parent_collection)
+
+        #             else:
+        #                 # 若無相同名稱物件，下載並創建新物件
+        #                 ar_file = client.download(url)
+        #                 if ar_file:
+        #                     empty_InfoBall = create_empty_object(name, parent=None)
+        #                     location_cor = (ar_obj['location']['x'],ar_obj['location']['z']*-1,ar_obj['location']['y']++(arinfoballv1_params['plane_height'] + arinfoballv1_params['layer_gap'] / 2) * ar_obj['zoom']['y'])
+        #                     set_empty_object(empty_InfoBall, location_cor, rotation, scale)
+
+        #                     # 生成和附加層平面
+        #                     create_info_sphere_layers(empty_InfoBall, arinfoballv1_params)
+        #                     obj = bpy.data.objects.get(name)
+        #                     if obj:
+        #                         object_to_collection(obj, parent_collection)
+        #                         print(f"資訊球 '{name}' 已成功導入並配置完成")
+        #                 else:
+        #                     bpy.ops.loaddon.message('INVOKE_DEFAULT', message=f"Unable to download model for {name}")
+
+        # def create_info_sphere_layers(parent_obj, params):
+        #     """
+        #     創建多層資訊球環結構，並將所有平面設置為 parent_obj 的子級。
+        #     """
+        #     num_layers = params['num_layers']
+        #     num_planes = params['num_planes']
+        #     plane_width = params['plane_width']
+        #     plane_height = params['plane_height']
+        #     plane_gaps = params['plane_gaps']
+        #     layer_gap = params['layer_gap']
+        #     rotation_x_values = params['rotation_x_values']
+        #     image_paths = params['image_paths']
+            
+        #     all_planes = create_ring_of_planes(
+        #         num_layers=num_layers, 
+        #         num_planes=num_planes, 
+        #         width=plane_width, 
+        #         height=plane_height,
+        #         plane_gaps=plane_gaps, 
+        #         layer_gap=layer_gap, 
+        #         rotation_x_values=rotation_x_values,
+        #         image_paths=image_paths,
+        #         parent_obj=parent_obj  # 新增的參數，直接設置每個平面的父物件
+        #     )
+        #     return all_planes
+
+        # client = LigDataApi.ApiClient.shared()
+        # # 確保用戶已登錄
+        # if not client.authenticated():  # 檢查是否已登錄
+        #     self.report({'ERROR'}, "Login to LiG Cloud first")
+        #     return {'CANCELLED'}                 
+        # ar_objects = client.download_ar_objects(context.scene.lig_scene)   
+        # parent_col_name = context.scene.lig_scene # 確保所有下載的AR對象被統一存放在parent_col collection中，方便管理
+        # parent_collection = bpy.data.collections.get(parent_col_name) or CreateCollection.create_collection(parent_col_name)
+        # ar_objects_count = len(ar_objects)
+        # print("ar_objects 物件數量:",ar_objects_count)
+        # for i, ar_obj in enumerate(ar_objects,1):
+        #     print(f'ar_obj-{i}:{ar_obj}')
+
+        # collection_name = parent_col_name  # 請替換為您的集合名稱
+        # Collection_objects_count = count_objects_in_collection(collection_name)
+
+        # if set_save_path != '':     
+        #     if os.path.exists(set_save_path):  
+        #         for ar_obj in ar_objects:  #ar_obj is dict
+        #             download_url = extract_url(ar_obj)
+        #             if not download_url:
+        #                 self.report({'WARNING'}, f"No URL found for object {ar_obj['id']}")
+        #                 continue                    
+        #             # 設置文件路徑
+        #             obj_name = str(ar_obj['id'])+"-"+ar_obj['name']
+        #             obj_type = ar_obj['model']['type']
+        #             file_name = f"{obj_name}.json"
+        #             full_path = os.path.join(context.scene.save_path, file_name)
+        #             # 保存數據
+                    
+        #             if obj_name in bpy.data.objects:  #如果物件已經存在，進行屬性更新
+        #                 print(f"{obj_name} The scene already has an object with the same name and will be updated with new propertues.")
+        #                 obj = bpy.data.objects[obj_name]
+        #                 obj.location = (ar_obj['location']['x'],ar_obj['location']['z']*-1,ar_obj['location']['y'])
+        #                 obj.rotation_euler = tuple(map(math.radians, (ar_obj['location']['rotate_x'],ar_obj['location']['rotate_z']*-1,ar_obj['location']['rotate_y'])))
+        #                 obj.scale = (ar_obj['zoom']['x'],ar_obj['zoom']['z'],ar_obj['zoom']['y'])          
+        #                 obj.json_props.json_data = json.dumps(ar_obj)
+        #                 obj_name = obj.json_props.obj_name
+        #                 sync_from_json(obj_name,obj_type)
+        #                 save_json_to_file(obj, full_path)
+        #             else:   # 若無相同名稱物件，下載並創建新物件
+        #                 ar_file = client.download(download_url)
+        #                 if ar_file:
+        #                     model_path = ar_file.name
+        #                     location = (ar_obj['location']['x'],ar_obj['location']['z']*-1,ar_obj['location']['y'])
+        #                     rotation = tuple(map(math.radians, (ar_obj['location']['rotate_x'],ar_obj['location']['rotate_z']*-1,ar_obj['location']['rotate_y'])))
+        #                     scale = (ar_obj['zoom']['x'],ar_obj['zoom']['z'],ar_obj['zoom']['y'])
+        #                     if obj_type == ARObjectType.ARINFOBALL.value:
+        #                         plane_height = ar_obj['model'].get('fields', {})['plane_height']
+        #                         layer_gap = ar_obj['model'].get('fields', {})['layer_gap']
+        #                         empty_InfoBall = create_empty_object(obj_name, parent=None)
+        #                         location_cor = (ar_obj['location']['x'], ar_obj['location']['z']*-1, (ar_obj['location']['y']+ plane_height+ layer_gap / 2) * ar_obj['zoom']['y'])
+        #                         set_empty_object(empty_InfoBall, location_cor, rotation, scale)             
+        #                     else:
+        #                         import_objects(ar_obj, model_path, obj_name, location, rotation, scale)
+        #                     obj = bpy.data.objects.get(obj_name)
+        #                     # Step1: ar_obj 寫進json_data
+        #                     # 把ar_obj資料寫進 json_data裡面
+        #                     # =====================================================
+        #                     #完成json_data的初始化
+        #                     # =====================================================
+        #                     obj.json_props.json_data = json.dumps(ar_obj)  #把ar_obj轉為字串存到json_data完成初始化
+        #                     # Step2: json_data資料寫進 props
+        #                     sync_from_json(obj_name,obj_type)
+        #                     print('json_data')
+        #                     print(obj.json_props.json_data)
+        #                     # step3: 存json檔
+        #                     save_json_to_file(obj, full_path)
+        #                     if obj:
+        #                         object_to_collection(obj, parent_collection)
+        #                 else:
+        #                     bpy.ops.loaddon.message('INVOKE_DEFAULT', message=f"Unable to download model for {obj_name}")
+                    
+        #         return {'FINISHED'}
+        #     else:
+        #         self.report({'ERROR'}, 'The path entered does not exist.')
+        #         return {'CANCELLED'}
+            
+        # elif set_save_path == '':
+        #     self.report({'ERROR'}, 'Please set the save path first')
+        #     return {'CANCELLED'}
+        # context.area.tag_redraw()
+        # self.report({'INFO'}, "Download completed.")
+        # return {'FINISHED'}
 
 class LiGJSONRefreshOperator(Operator): # get json from json file
     bl_idname = "lig.json_refresh"
@@ -1728,7 +2311,9 @@ class LiGJSONRefreshOperator(Operator): # get json from json file
             bpy.context.view_layer.objects.active = root_obj  # 設置活動物件
             bpy.ops.object.select_all(action='DESELECT')  # 清除所有選擇
             root_obj.select_set(True)  # 選擇根物件
-          
+            obj_type = obj.json_props.model_type
+            obj = bpy.data.objects.get(obj_name)
+            
             # 构建 JSON 文件路径
             json_file = os.path.join(set_save_path, obj_name + ".json")
             # 检查 JSON 文件是否存在
@@ -1738,24 +2323,19 @@ class LiGJSONRefreshOperator(Operator): # get json from json file
                     data = json.load(file)
                 # 将 JSON 数据转换为字符串并存储到对象的 json_props 属性中
                 obj.json_props.json_data = json.dumps(data)
-                if isinstance(data, dict):
-                    for key, value in data.items():
-                        print(f"{key}: {value}")
             else:
                 # 文件不存在时，报告信息
                 self.report({'INFO'}, f"文件 {json_file} 不存在")
-
+            sync_from_json(obj_name,obj_type)
         self.report({'INFO'}, "下載完成")
             # 下载更新完成后自动执行 json_refresh 操作
-        # bpy.ops.lig.json_refresh()
-        
         return {'FINISHED'}
 
 class LiGJSONUpdata(Operator):  # Json update 
     bl_idname = "lig.json_update"
     bl_label = "Update JSON"
     bl_description = "update the properties if objects' property changed"
-
+    # 從json_props 至 json_data 至 json file
     def execute(self, context):
         set_save_path = context.scene.save_path
         # 獲取集合名稱
@@ -1775,6 +2355,7 @@ class LiGJSONUpdata(Operator):  # Json update
                 obj_name = root_obj.name
                 obj_type = obj.json_props.type
                 json_file = os.path.join(set_save_path, obj_name + ".json")
+                sync_to_json(obj_name,obj_type)
                 save_json_to_file(obj,json_file)
 
         self.report({'INFO'}, "JSON 更新完成")
@@ -1815,7 +2396,7 @@ class LiGJSONUpLoad(Operator,LiGAccount): # Json upload to server
                 if 'location' in data:
                     location = obj.location
                     location = [round(val, 4) for val in location]  # 四捨五入到小數點後二位
-                    data['location'] = location
+                    data['location']['x'] = location[0]
 
                 # 如果在JSON數據中存在'rotation'鍵，則更新其值
                 if 'rotation' in data:
@@ -1829,7 +2410,6 @@ class LiGJSONUpLoad(Operator,LiGAccount): # Json upload to server
                     scale = [round(val, 4) for val in scale]# 四捨五入到小數點後二位
                     data['scale'] = scale
                 
-                # context.object.json_props.json_data = json.dumps(data)
                 obj.json_props.json_data = json.dumps(data)
 
                 # 生成文件路径
@@ -1858,37 +2438,35 @@ class LiGJSONUpLoad(Operator,LiGAccount): # Json upload to server
                 scale = obj.scale
                 scale = [round(val, 4) for val in scale]
                 scale_x, scale_y, scale_z = transform(0, 0, 0, 0, 0, 0, *scale)[-3:]
-
-                obj.json_props.json_data = json.dumps(data)  # 存回json_data
-        #henry-------------------------------------------------------------------
-        #依照不同type parameters建立完整的json格式
+                #henry-------------------------------------------------------------------
+                #依照不同type parameters建立完整的json格式
                 #取出JSON鍵值
-                id_data = data['ar_obj'].get('id')
-                name = data['ar_obj'].get('name')
-                type_data = data['ar_obj']['model'].get('type')
-                configuration = data['ar_obj'].get('configuration')
-                created_time = data['ar_obj'].get('created_at')
-                updated_time = data['ar_obj'].get('updated_at')
-                light_id = data['ar_obj'].get('light_id')
-                ar_object_owner_id = data['ar_obj'].get('ar_object_owner_id')
-                ar_object_owner_type = data['ar_obj'].get('ar_object_owner_type')
-                texture_data = data['ar_obj']['model'].get('texture')
+                id_data = data.get('id')
+                name = data.get('name')
+                type_data = data['model'].get('type')
+                configuration = data.get('configuration')
+                created_time = data.get('created_at')
+                updated_time = data.get('updated_at')
+                light_id = data.get('light_id')
+                ar_object_owner_id = data.get('ar_object_owner_id')
+                ar_object_owner_type = data.get('ar_object_owner_type')
+                texture_data = data['model'].get('texture')
                 url_data = texture_data.get('url') if texture_data is not None else None
                 url_id_data = texture_data.get('id') if texture_data is not None else None
-                ios_texture = data['ar_obj']['model'].get('ios_texture')
-                android_texture = data['ar_obj']['model'].get('android_texture')
+                ios_texture = data['model'].get('ios_texture')
+                android_texture = data['model'].get('android_texture')
                 ios_texture_url = ios_texture.get('url') if ios_texture is not None else None
                 ios_texture_id = ios_texture.get('id') if ios_texture is not None else None
                 android_texture_url = android_texture.get('url') if android_texture is not None else None
                 android_texture_id = android_texture.get('id') if android_texture is not None else None
                 transparency = data.get('transparency')
-                group = data['ar_obj'].get('group')
-                zone_id = data['ar_obj'].get('zone_id')
-                scene_id = data['ar_obj'].get('scene_id')
-                sub_events = data['ar_obj'].get('sub_events')
-                is_child = data['ar_obj'].get('is_child')
+                group = data.get('group')
+                zone_id = data.get('zone_id')
+                scene_id = data.get('scene_id')
+                sub_events = data.get('sub_events')
+                is_child = data.get('is_child')
                 
-                field = data['ar_obj']['model']['fields']
+                field = data['model']['fields']
                 #general parameters
                 is_ignore_data = field.get('is_ignore', False)
                 is_hidden_data = field.get('is_hidden', False)
@@ -1941,8 +2519,8 @@ class LiGJSONUpLoad(Operator,LiGAccount): # Json upload to server
                 floor_angles = field.get('floor_angles')
                 face_gap_list = field.get('face_gap_list')
                 photo_texture = field.get('texture')
-                actions = data['ar_obj'].get('actions',[])
-                events  = data['ar_obj'].get('events',[])
+                actions = data.get('actions',[])
+                events  = data.get('events',[])
 
                 # Particle(type=16) 
                 particle_birth_rate = field.get('particle_birth_rate')
@@ -1968,6 +2546,12 @@ class LiGJSONUpLoad(Operator,LiGAccount): # Json upload to server
                             'y': scale_y,
                             'z': scale_z,
                         },
+                        "configuration": configuration,
+                        "created_at": created_time,
+                        "updated_at": updated_time,
+                        "light_id": light_id,
+                        "ar_object_owner_id": ar_object_owner_id,
+                        "ar_object_owner_type": ar_object_owner_type,
                         "model": {
                             "type": type_data,
                             "fields": {
@@ -1987,10 +2571,17 @@ class LiGJSONUpLoad(Operator,LiGAccount): # Json upload to server
                                 "face_gap_list":face_gap_list,
                             },
                             "texture": photo_texture,
+                            'ios_texture': None, 
+                            'android_texture': None
                         },
-                        "transparency": transparency,
-                        #"actions": actions,
-                        #"evnets": events
+                        'actions': actions, 
+                        'transparency': transparency, 
+                        'group': group, 
+                        'zone_id': None, 
+                        'events': None, 
+                        'scene_id': scene_id, 
+                        'sub_events': sub_events,
+                        'is_child': is_child
                     }
 
                 elif type_data == ARObjectType.MODEL_3D.value: #3D物件
@@ -2095,7 +2686,9 @@ class LiGJSONUpLoad(Operator,LiGAccount): # Json upload to server
                                 "is_hidden": is_hidden_data,
                                 "is_size_scale_lock": is_size_scale_lock,
                                 "is_double_sided": is_double_sided,
-                                "is_allow_pinch":is_allow_pinch
+                                "is_allow_pinch":is_allow_pinch,
+                                "bloom_intensity":bloom_intensity,
+                                "bloom_radius":bloom_radius,  
                             },
                             "texture": {
                                 "url": url_data,
@@ -2152,6 +2745,7 @@ class LiGJSONUpLoad(Operator,LiGAccount): # Json upload to server
                                 "face_me": face_me_data,
                                 "is_ignore": is_ignore_data,
                                 "visible_distance": visible_distance_data,
+                                "hue_angle":hue_angle_data,
                                 "hue_range": hue_range_data,
                                 "saturation": saturation_data,
                                 "is_play": is_play_data,
@@ -2280,6 +2874,9 @@ class LiGJSONUpLoad(Operator,LiGAccount): # Json upload to server
                         #"evnets": events
                     }
 
+                obj.json_props.json_data = json.dumps(params)
+                file_path = os.path.join(set_save_path, f"{obj.name}.json")
+                save_json_to_file(obj, file_path)              
                 print(f'params: {params}')
                 client.upload(params)
         self.report({'INFO'}, "LiG Cloud 上傳成功")
@@ -2437,10 +3034,36 @@ class LiGSetupOperator(Operator): # update user scenes from server 從服務器�
             context.scene.lig_scenes.add().name = '%d %s' % (scene['id'], scene['name'],)
         # bpy.ops.chack.images_plane()
         bpy.ops.file.autopack_toggle()#檔案自動打包
-
-        
+       
         return { 'FINISHED' }
-    
+
+class OBJECT_OT_ApplyParticleEffect(Operator):
+    bl_idname = "object.apply_particle_effect"
+    bl_label = "Apply Particle Effect"
+    bl_description = "Generate particle effect based on the properties"
+
+    def execute(self, context):
+        props = context.object.particle_props
+
+        # 创建粒子系统
+        bpy.ops.object.particle_system_add()
+        particle_system = context.object.particle_systems[-1]
+        settings = particle_system.settings
+
+        # 设置粒子参数
+        settings.count = int(props.particle_birth_rate)
+        settings.lifetime = props.particle_life_span
+        settings.normal_factor = props.particle_velocity
+
+        # 添加随机性
+        settings.use_random_lifetime = True
+        settings.lifetime_random = props.particle_life_span_variation
+        settings.use_random_velocity = True
+        settings.velocity_random = props.particle_velocity_variation
+
+        self.report({'INFO'}, "Particle effect applied!")
+        return {'FINISHED'}
+
 class LiGLogoutOperator(Operator):
     bl_idname = "lig.logout_operator"
     bl_label = "Logout LiG Cloud"
@@ -2646,7 +3269,6 @@ class LIGASSET_OP_Upload(Operator): #新增檔案
         assets_str = assets_str.replace("\\", "/")
         LigDataApi.ApiClient.shared().upload_files(assets_list)
         
-        print(assets_str)
         self.report({'INFO'}, "已上傳完畢。")
         print("已上傳完畢。")
         return {'FINISHED'}
@@ -2668,36 +3290,6 @@ class LIGASSET_OP_RemoveTextField(Operator):
             context.scene.ligasset_upload_texts.remove(len(context.scene.ligasset_upload_texts) - 1)
         return {'FINISHED'}
 
-class UploadToServerOperator(Operator):
-    bl_idname = "object.upload_to_server"
-    bl_label = "Upload to Server"
-
-    def execute(self, context):
-        obj = context.object
-        if not obj:
-            self.report({'ERROR'}, "請選擇一個物件")
-            return {'CANCELLED'}
-
-        file_type = obj.get("file_type", "unknown")
-        data = {
-            "name": obj.name,
-            "type": file_type,
-            "fields": {key: obj[key] for key in obj.keys() if not key.startswith("_")},
-            "location": list(obj.location),
-            "rotation": [round(math.degrees(a), 2) for a in obj.rotation_euler],
-            "scale": list(obj.scale)
-        }
-
-        # 模擬伺服器上傳
-        self.upload_to_server(data)
-        self.report({'INFO'}, f"已將 {obj.name} 的數據上傳")
-        return {'FINISHED'}
-
-    def upload_to_server(self, data):
-        """模擬上傳到伺服器"""
-        import json
-        print("上傳數據:", json.dumps(data, indent=4))
-        # 在此添加實際的 API 調用代碼
 
 class CreateCollection:
     @staticmethod
@@ -2717,7 +3309,6 @@ class CreateCollection:
             print(f"'{name}' 已存在")
             return bpy.data.collections[name]
 collection_creator = CreateCollection()
-
 
 #共用函式區---------------------------------------------------------------------------------------------------------------------
 
@@ -2769,7 +3360,6 @@ classes = (
     LiGToggleProperties,
     TargetObjectItem,    
     #ProgressOperator,
-    UploadToServerOperator,
     LIG_PT_JsonPanel,
     LiG_PT_BasicPanel,
     LiGJSONFrameSelectedOperator,
@@ -2788,9 +3378,11 @@ classes = (
     LiG_PT_ObjSelection,
     LiG_PT_OBJAlignment,
     EventOperation,
+    OBJECT_OT_ApplyParticleEffect,
 )
 
 def register():
+    install_packages()
     for cls in classes:
         bpy.utils.register_class(cls)
 
@@ -2845,7 +3437,6 @@ def unregister():
     del bpy.types.Object.json_props
     del bpy.types.Scene.ligasset_upload_texts
     del bpy.types.Object.actions_props
-
 
 def refresh_ui():
     for area in bpy.context.window_manager.windows[0].screen.areas:
